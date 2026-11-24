@@ -711,14 +711,15 @@ def build_project_rule_block(
 ) -> str:
     if confirm_mode == "auto-in-allowlist":
         confirm_note = (
-            "本目录已启用白名单内无感同步：在完成科研/代码阶段推进时，可自动将本目录更新同步至 "
-            "`progress/YYYY-MM-DD.md`、`code/`、`weekly/<W>/artifacts/` 并直接运行 `push`；"
+            "本目录已启用白名单内无感同步：在完成本目录及其子目录下的科研推进、代码/图表产物整理或项目讨论后，"
+            "可自动同步至 `progress/YYYY-MM-DD.md`、`code/`、`weekly/<W>/artifacts/` 与脱敏的 `sessions/YYYY-MM-DD-*.md`，"
+            "并直接运行 `push` / `upload`；"
             "**例外**：修改或创建学生本人判断页 `weekly/<W>/judgment.md` 时，必须先完整展示给本人审阅并加 `--confirm`。"
         )
     else:
         confirm_note = (
-            "当前为预览确认模式：整理本目录进展、`evidence.md`、代码/图表后，先运行 `preview` "
-            "向本人展示清单与摘要，获得明确同意后再加 `--confirm` 执行 `push` 或 `upload`。"
+            "当前为预览确认模式：整理本目录及其子目录的进展、`evidence.md`、代码/图表或 `sessions/YYYY-MM-DD-*.md` 后，"
+            "先运行 `preview` 向本人展示清单与摘要，获得明确同意后再加 `--confirm` 执行 `push` 或 `upload`。"
         )
     return "\n".join(
         [
@@ -726,7 +727,7 @@ def build_project_rule_block(
             f"## 课题组科研同步（仅限本白名单目录：`{project_dir.name}`）",
             "",
             f"- 协议中心：`{hub_dir}`（见 `protocol/CURRENT.md`）｜私有仓库：`{repo_dir}`",
-            f"- **硬范围边界**：绝不把本目录之外的项目、全局隐私、密钥、数据集大表或模型权重写入 `{repo_dir}`。",
+            f"- **硬范围与零全局影响**：只适用于本目录及其子目录内的文件、代码、图表与科研讨论项目；绝不影响本机其他目录的 AI 对话，绝不读取本目录之外的内容，也不写入密钥、大表或模型权重到 `{repo_dir}`。",
             f"- **触发与上传**：{confirm_note}",
             f"- 快捷上传：`python3 \"{hub_dir / 'scripts' / 'yao_sync.py'}\" upload --from-dir \"{project_dir}\" ...`",
             MARKER_END,
