@@ -348,12 +348,12 @@ def check_gh_ready() -> Tuple[bool, str]:
 
 
 def print_manual_github_guide(repo_name: str, repo_dir: Path, project_dir: Path, collaborators: List[Dict[str, str]]) -> None:
-    collab_names = ", ".join(c["github"] for c in collaborators)
+    collab_names = ", ".join(c["github"] for c in collaborators) or "（无外部协作者）"
     print(
         "\n[需要登录 gh 或按 3 步在网页建私有库]\n"
         "  1) 若有 gh，运行 gh auth login 后重跑本命令；\n"
         f"  2) 或打开 https://github.com/new ，仓库名填 {repo_name}，可见性必须选【Private】，\n"
-        f"     然后在 Settings -> Collaborators 添加为 Read(只读)：{collab_names}；\n"
+        f"     然后在 Settings -> Collaborators 添加协作者（组织库选 Read/Pull；个人私有库直接 Add 即可）：{collab_names}；\n"
         f'  3) 执行：python3 ~/.yao-research/hub/scripts/yao_sync.py init --project-dir "{project_dir}" --skip-remote\n'
         f"     cd {repo_dir} && git remote add origin https://github.com/<你的GitHub账号>/{repo_name}.git && git push -u origin main\n",
         file=sys.stderr,
@@ -392,6 +392,27 @@ def verify_repo_not_public(full_name: str) -> None:
         pass
 
 
+def resolve_collaborators(
+    default_collaborators: List[Dict[str, str]],
+    collaborators_arg: Optional[str],
+) -> List[Dict[str, str]]:
+    if collaborators_arg is None:
+        return list(default_collaborators)
+    known = {item["github"].lower(): dict(item) for item in default_collaborators}
+    resolved: List[Dict[str, str]] = []
+    seen = set()
+    for raw in collaborators_arg.split(","):
+        login = raw.strip().lstrip("@")
+        if not login or login.lower() in seen:
+            continue
+        seen.add(login.lower())
+        if login.lower() in known:
+            resolved.append(known[login.lower()])
+        else:
+            resolved.append({"github": login, "role": "collaborator", "permission": "pull"})
+    return resolved
+
+
 def ensure_private_remote_repo(
     owner: str,
     repo_name: str,
@@ -401,7 +422,8 @@ def ensure_private_remote_repo(
 ) -> str:
     full_name = existing_origin_slug or f"{owner}/{repo_name}"
     if dry_run:
-        print(f"[dry-run] Would ensure private repo {full_name} with pull-only collaborators.")
+        collab_list = ", ".join(c["github"] for c in collaborators) or "none"
+        print(f"[dry-run] Would ensure private repo {full_name} with collaborators: {collab_list}.")
         return full_name
 
     probe = run_cmd(["gh", "api", f"repos/{full_name}"], check=False)
@@ -428,9 +450,23 @@ def ensure_private_remote_repo(
             ["gh", "api", "-X", "PUT", f"repos/{full_name}/collaborators/{collab}", "-f", f"permission={perm}"],
             check=False,
         )
-        if proc.returncode != 0:
-            raise RuntimeError(f"授权协作者 {collab} 失败：{proc.stderr.strip() or proc.stdout.strip()}")
-        print(f"[ok] 已设置协作者权限：{collab} ({perm} 只读)")
+        if proc.returncode == 0:
+            print(f"[ok] 已设置协作者权限：{collab} ({perm} 只读)")
+            continue
+        err_text = f"{proc.stderr}\n{proc.stdout}".strip()
+        if ("422" in err_text) or ("Cannot assign" in err_text) or ("permission of read" in err_text):
+            fallback = run_cmd(
+                ["gh", "api", "-X", "PUT", f"repos/{full_name}/collaborators/{collab}"],
+                check=False,
+            )
+            if fallback.returncode == 0:
+                print(
+                    f"[ok] 已邀请协作者：{collab}（注：GitHub 个人私有库平台层不支持只读 pull，"
+                    "已按标准协作者邀请；汇总脚本 secretary_collect.py 为纯只读，本人可随时在 GitHub Settings 撤销）"
+                )
+                continue
+            err_text = f"{fallback.stderr}\n{fallback.stdout}".strip()
+        raise RuntimeError(f"授权协作者 {collab} 失败：{err_text}")
     return full_name
 
 
@@ -754,10 +790,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     version_cfg, _ = load_hub_configs(hub_dir)
     repo_name = args.repo_name or version_cfg.get("default_repo_name", DEFAULT_REPO_NAME)
-    collaborators = version_cfg.get("required_collaborators", [
+    default_collaborators = version_cfg.get("required_collaborators", [
         {"github": "taoyao2005", "role": "advisor", "permission": "pull"},
         {"github": "treerobin06", "role": "secretary", "permission": "pull"},
     ])
+    collaborators = resolve_collaborators(default_collaborators, getattr(args, "collaborators", None))
 
     existing_origin_slug: Optional[str] = None
     if (repo_dir / ".git").exists():
@@ -778,7 +815,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         advisor_logins = {c.get("github", "").lower() for c in collaborators if c.get("role") == "advisor"}
         if owner.lower() in advisor_logins:
             print(
-                f"[note] 检测到当前 GitHub 账号 {owner} 为导师角色：导师只需接收同学私有库的只读邀请，通常无需安装学生端。"
+                f"[note] 检测到当前 GitHub 账号 {owner} 为导师角色：导师只需接收同学私有库的协作者邀请，通常无需安装学生端。"
             )
         full_repo_name = ensure_private_remote_repo(
             owner=owner,
@@ -800,11 +837,12 @@ def cmd_init(args: argparse.Namespace) -> int:
             run_cmd(["git", "config", "user.email", f"{owner}@users.noreply.github.com"], cwd=repo_dir)
 
     write_if_missing(repo_dir / ".gitignore", STUDENT_GITIGNORE, args.dry_run)
+    collab_label = "、".join(f"`{c['github']}`" for c in collaborators) or "仅本人"
     write_if_missing(
         repo_dir / "README.md",
         (
             f"# {owner} · 个人私有科研进展仓库\n\n"
-            "- 可见性：Private（仅本人、导师 `taoyao2005` 与秘书 `treerobin06` 只读可见）\n"
+            f"- 可见性：Private（仅本人与授权协作者 {collab_label} 可见；汇总脚本仅只读拉取）\n"
             "- 允许内容：仅 `progress/YYYY-MM-DD.md`（今日进展）与 `weekly/YYYY-Www/report.md`（纯文本摘要）\n"
         ),
         args.dry_run,
@@ -1065,15 +1103,20 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Yao Research Group 隐私优先科研进展手动同步工具 (v2.0)")
+    parser = argparse.ArgumentParser(description="Yao Research Group 隐私优先科研进展手动同步工具 (v2.0.1)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="登记授权科研目录、建私有库(协作者只读pull)并装Git隐私硬钩子")
+    p_init = sub.add_parser("init", help="登记授权科研目录、建私有库(支持 --collaborators)并装Git隐私硬钩子")
     p_init.add_argument("--project-dir", default=None, help="必填：用户明确指定的一个科研工作目录")
     p_init.add_argument("--repo-name", default=None, help="私有仓库名（默认 yao-research-memory）")
     p_init.add_argument("--repo-dir", default="~/.yao-research/repo", help="本地私有库路径")
     p_init.add_argument("--hub-dir", default=None, help="本地协议中心路径")
     p_init.add_argument("--policy-file", default=str(default_policy_file()), help="本地白名单策略文件")
+    p_init.add_argument(
+        "--collaborators",
+        default=None,
+        help="逗号分隔指定邀请的 GitHub 协作者，默认从 protocol/version.json 读取，如 taoyao2005",
+    )
     p_init.add_argument("--skip-remote", action="store_true", help="跳过远端 GitHub 建库")
     p_init.add_argument("--dry-run", action="store_true", help="仅预览操作不写文件")
 

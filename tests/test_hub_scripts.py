@@ -312,6 +312,106 @@ class HubV20PrivacyTests(unittest.TestCase):
         self.assertIn("已交今日进展（周报待交）", html_text)
         self.assertIn("已提交周报", html_text)
 
+    def test_collaborator_422_fallback_and_filter(self) -> None:
+        calls = []
+
+        def fake_run_cmd(cmd, cwd=None, check=True, timeout=None):
+            calls.append(list(cmd))
+            if cmd[:3] == ["gh", "api", "repos/alice/yao-research-memory"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout=json.dumps({"private": True}), stderr=""
+                )
+            if (
+                cmd[:4] == ["gh", "api", "-X", "PUT"]
+                and "collaborators/taoyao2005" in cmd[4]
+                and "-f" in cmd
+            ):
+                return subprocess.CompletedProcess(
+                    cmd,
+                    1,
+                    stdout="",
+                    stderr="gh: Validation Failed (HTTP 422): Cannot assign taoyao2005 permission of read",
+                )
+            if (
+                cmd[:4] == ["gh", "api", "-X", "PUT"]
+                and "collaborators/taoyao2005" in cmd[4]
+                and "-f" not in cmd
+            ):
+                return subprocess.CompletedProcess(cmd, 0, stdout="{}", stderr="")
+            raise AssertionError(f"Unexpected cmd: {cmd}")
+
+        orig_run_cmd = yao_sync.run_cmd
+        yao_sync.run_cmd = fake_run_cmd
+        try:
+            # 1) Owner skipped; advisor hits HTTP 422 on permission=pull -> retries without -f permission
+            collabs = [
+                {"github": "alice", "role": "owner", "permission": "pull"},
+                {"github": "taoyao2005", "role": "advisor", "permission": "pull"},
+            ]
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf):
+                full = yao_sync.ensure_private_remote_repo(
+                    owner="alice",
+                    repo_name="yao-research-memory",
+                    collaborators=collabs,
+                    existing_origin_slug=None,
+                    dry_run=False,
+                )
+            self.assertEqual(full, "alice/yao-research-memory")
+            self.assertEqual(
+                calls,
+                [
+                    ["gh", "api", "repos/alice/yao-research-memory"],
+                    ["gh", "api", "-X", "PUT", "repos/alice/yao-research-memory/collaborators/taoyao2005", "-f", "permission=pull"],
+                    ["gh", "api", "-X", "PUT", "repos/alice/yao-research-memory/collaborators/taoyao2005"],
+                ],
+            )
+            self.assertIn("标准协作者邀请", out_buf.getvalue())
+        finally:
+            yao_sync.run_cmd = orig_run_cmd
+
+        # 2) --collaborators filter via resolve_collaborators / init --collaborators
+        selected = yao_sync.resolve_collaborators(
+            [
+                {"github": "taoyao2005", "role": "advisor", "permission": "pull"},
+                {"github": "treerobin06", "role": "secretary", "permission": "pull"},
+            ],
+            "taoyao2005",
+        )
+        self.assertEqual(selected, [{"github": "taoyao2005", "role": "advisor", "permission": "pull"}])
+        custom = yao_sync.resolve_collaborators(
+            [{"github": "taoyao2005", "role": "advisor", "permission": "pull"}],
+            "taoyao2005,bob",
+        )
+        self.assertEqual(
+            custom,
+            [
+                {"github": "taoyao2005", "role": "advisor", "permission": "pull"},
+                {"github": "bob", "role": "collaborator", "permission": "pull"},
+            ],
+        )
+
+        # 3) CLI --collaborators option parses cleanly and passes through init --dry-run
+        p_cli = self.tmp / "cli_proj"
+        p_cli.mkdir(parents=True)
+        parsed = yao_sync.parse_args(
+            ["init", "--project-dir", str(p_cli), "--collaborators", "taoyao2005", "--skip-remote", "--dry-run"]
+        )
+        self.assertEqual(parsed.collaborators, "taoyao2005")
+        rc_cli = yao_sync.main(
+            [
+                "init",
+                "--project-dir", str(p_cli),
+                "--repo-dir", str(self.tmp / "cli_repo"),
+                "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(self.tmp / "cli_pol.json"),
+                "--collaborators", "taoyao2005",
+                "--skip-remote",
+                "--dry-run",
+            ]
+        )
+        self.assertEqual(rc_cli, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -743,7 +743,7 @@ def generate_digests(
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="秘书与导师汇总端：自动收邀、拉取私有库、生成汇总与HTML")
     parser.add_argument("--workspace", default="~/.yao-research-secretary", help="秘书私有聚合工作区（0700）")
-    parser.add_argument("--accept-invites", action="store_true", help="自动接收 GitHub 上 yao-research-* 私有库只读邀请")
+    parser.add_argument("--accept-invites", action="store_true", help="自动接收 GitHub 上 yao-research-* 私有库协作者邀请")
     parser.add_argument("--add-repo", action="append", default=[], help="手动登记仓库（owner/repo 或 owner/repo=本地路径）")
     parser.add_argument("--sync", action="store_true", help="批量 clone/pull 已登记的私有仓库")
     parser.add_argument("--digest", action="store_true", help="生成 status.json / team-digest.md / preread / HTML")

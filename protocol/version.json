@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "2.0.1",
   "notebook_schema_version": 3,
   "updated_at": "2026-11-24",
   "hub_repo": "Yao-Research-Group/research-hub",
@@ -49,6 +49,11 @@
     }
   },
   "changelog": [
+    {
+      "version": "2.0.1",
+      "date": "2026-11-24",
+      "summary": "Handle GitHub personal repo HTTP 422 fallback when assigning pull permission, add --collaborators option on init (e.g., --collaborators taoyao2005), and clarify personal vs org repo collaborator permissions in privacy docs."
+    },
     {
       "version": "2.0.0",
       "date": "2026-11-24",
