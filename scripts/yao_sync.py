@@ -714,6 +714,23 @@ def cmd_init(args: argparse.Namespace) -> int:
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     project_dir = Path(args.project_dir).expanduser().resolve() if args.project_dir else None
 
+    if project_dir is None and not getattr(args, "use_global", False) and not args.no_agent_md:
+        print(
+            "[ACTION_REQUIRED] 安装前请先让用户二选一确认规则安装范围（不问姓名/拼音等其他问题）：\n"
+            '  ① 只装到一个指定的科研工作目录（推荐）：请用户明确给出目录路径后加 --project-dir "<目录路径>"；\n'
+            "  ② 全局安装：加 --global；\n"
+            "  ③ 仅建库不写入任何规则：加 --no-agent-md。",
+            file=sys.stderr,
+        )
+        return 2
+
+    if project_dir is not None and not project_dir.is_dir():
+        print(
+            f"[error] 指定的科研工作目录不存在：{project_dir}。请让用户明确提供正确目录路径（不可自动猜测），或改用 --global。",
+            file=sys.stderr,
+        )
+        return 2
+
     maybe_pull_hub(hub_dir, force_pull=False, skip_remote=args.skip_remote)
     version_cfg, _ = load_hub_configs(hub_dir)
     repo_name = args.repo_name or version_cfg.get("default_repo_name", DEFAULT_REPO_NAME)
@@ -741,6 +758,13 @@ def cmd_init(args: argparse.Namespace) -> int:
             return 2
         owner = gh_owner
         identity["github_login"] = owner
+        advisor_logins = {
+            c.get("github", "").lower() for c in collaborators if c.get("role") == "advisor"
+        }
+        if owner.lower() in advisor_logins:
+            print(
+                f"[note] 检测到当前 GitHub 账号 {owner} 为导师角色：导师只需接收同学私有库的协作者邀请，通常无需安装学生端上传规则。"
+            )
         full_repo_name = ensure_private_remote_repo(
             owner=owner,
             repo_name=repo_name,
@@ -1059,8 +1083,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Yao Research Group 个人私有科研笔记与周报同步工具")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="零提问初始化私有库与全局/项目 Agent 规则")
-    p_init.add_argument("--project-dir", default=None, help="指定仅装入某个科研项目目录")
+    p_init = sub.add_parser("init", help="初始化私有库与指定项目/全局 Agent 规则")
+    p_init.add_argument("--project-dir", default=None, help="指定只装入某一个科研工作目录（推荐）")
+    p_init.add_argument("--global", dest="use_global", action="store_true", help="显式确认写入全局 Agent 规则")
     p_init.add_argument("--targets", default=None, help="显式指定全局目标（claude,codex,gemini,cursor）")
     p_init.add_argument("--no-agent-md", action="store_true", help="跳过修改 AGENTS.md/CLAUDE.md")
     p_init.add_argument("--repo-name", default=None, help="私有仓库名（默认 yao-research-memory）")

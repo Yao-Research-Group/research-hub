@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.1.1",
   "notebook_schema_version": 2,
   "updated_at": "2026-11-24",
   "hub_repo": "Yao-Research-Group/research-hub",
@@ -45,6 +45,11 @@
     }
   },
   "changelog": [
+    {
+      "version": "1.1.1",
+      "date": "2026-11-24",
+      "summary": "Require explicit scope choice (--project-dir vs --global vs --no-agent-md) before writing rules, clarify advisor non-install flow, and align regular Monday deadline to 19:00."
+    },
     {
       "version": "1.1.0",
       "date": "2026-11-24",

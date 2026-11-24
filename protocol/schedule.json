@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.1.1",
   "timezone": "Asia/Shanghai",
   "utc_offset_hours": 8,
   "trial_weeks": 4,
@@ -16,13 +16,13 @@
   "regular_weekly": {
     "enabled": true,
     "deadline_weekday": 0,
-    "deadline_hour": 18,
+    "deadline_hour": 19,
     "deadline_minute": 0,
     "window_hours_before": 48,
     "grace_hours_after": 24,
     "auto_push_on_window": true,
     "require_human_judgment": false,
-    "description": "常规周报窗口：每周一 18:00 截止，提前 48 小时开放（周六 18:00 至周二 18:00）。"
+    "description": "常规周报窗口：每周一 19:00 截止，提前 48 小时开放（周六 19:00 至周二 19:00）。"
   },
   "product_weekly": {
     "enabled": true,
@@ -34,7 +34,7 @@
   "weekly_rhythm": [
     {
       "day": "Monday",
-      "time": "18:00",
+      "time": "19:00",
       "event": "weekly_report_due",
       "owner": "all_students",
       "description": "AI 自动在对话收尾汇总本周 logs/ 与代码提交，生成 weekly/<YYYY-Www>/report.md 并同步。"

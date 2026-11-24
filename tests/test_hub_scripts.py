@@ -43,10 +43,24 @@ class HubV11Tests(unittest.TestCase):
         prev_home = os.environ.get("HOME")
         os.environ["HOME"] = str(fake_home)
         try:
-            # 1) Zero-prompt global init
+            # 0) Calling init without --project-dir / --global / --no-agent-md MUST fail (rc=2) and touch nothing
+            rc_missing_scope = yao_sync.main(
+                [
+                    "init",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                ]
+            )
+            self.assertEqual(rc_missing_scope, 2)
+            self.assertEqual(claude_md.read_text(encoding="utf-8"), "# User existing Claude rules\n")
+            self.assertFalse((fake_home / ".codex" / "AGENTS.md").exists())
+
+            # 1) Explicit --global init
             rc = yao_sync.main(
                 [
                     "init",
+                    "--global",
                     "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
                     "--skip-remote",
@@ -71,10 +85,11 @@ class HubV11Tests(unittest.TestCase):
             self.assertTrue((fake_home / ".codex" / "AGENTS.md").is_file())
             self.assertTrue((fake_home / ".cursor" / "rules" / "yao-research-hub.mdc").is_file())
 
-            # Re-init is idempotent (exactly 1 marker block)
+            # Re-init with --global is idempotent (exactly 1 marker block)
             rc2 = yao_sync.main(
                 [
                     "init",
+                    "--global",
                     "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
                     "--skip-remote",
@@ -84,7 +99,7 @@ class HubV11Tests(unittest.TestCase):
             self.assertEqual(rc2, 0)
             self.assertEqual(claude_md.read_text(encoding="utf-8").count(yao_sync.BEGIN_MARKER), 1)
 
-            # 2) Project-dir init injects into project AGENTS.md & CLAUDE.md
+            # 2) Project-dir init injects ONLY into project AGENTS.md & CLAUDE.md
             rc3 = yao_sync.main(
                 [
                     "init",
@@ -97,6 +112,19 @@ class HubV11Tests(unittest.TestCase):
             self.assertEqual(rc3, 0)
             self.assertTrue((proj_dir / "AGENTS.md").is_file())
             self.assertTrue((proj_dir / "CLAUDE.md").is_file())
+
+            # 3) Non-existent --project-dir fails cleanly (rc=2) without creating directory
+            rc_bad_proj = yao_sync.main(
+                [
+                    "init",
+                    "--project-dir", str(self.tmp / "nonexistent_dir"),
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                ]
+            )
+            self.assertEqual(rc_bad_proj, 2)
+            self.assertFalse((self.tmp / "nonexistent_dir").exists())
         finally:
             if prev_home is None:
                 os.environ.pop("HOME", None)

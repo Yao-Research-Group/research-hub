@@ -9,10 +9,10 @@
 2. 进入新建仓库的 **Settings → Collaborators → Add people**：
    - 添加 `taoyao2005`（导师）
    - 添加 `treerobin06`（会议秘书）
-3. 克隆协议中心并初始化本地库后绑定远端：
+3. 克隆协议中心并初始化本地库后绑定远端（推荐用 `--project-dir` 指定你的科研工作目录；若希望跨目录触发则改用 `--global`）：
    ```bash
    git clone https://github.com/Yao-Research-Group/research-hub.git ~/.yao-research/hub
-   python3 ~/.yao-research/hub/scripts/yao_sync.py init --skip-remote
+   python3 ~/.yao-research/hub/scripts/yao_sync.py init --project-dir "/path/to/your/research-dir" --skip-remote
    cd ~/.yao-research/repo
    git remote add origin https://github.com/<你的GitHub账号>/yao-research-memory.git
    git push -u origin main
