@@ -1,0 +1,7 @@
+method,env,mean_return,success_rate,steps_trained,notes
+Model-M + RTG (L512),CartPole-v1,263.90,0.333,0,"10/30 episodes reached 500; seed_0..2"
+Baseline-T + RTG (L512),CartPole-v1,138.60,0.067,0,"2/30 episodes reached 500"
+Baseline-T + FQI10 (L512),CartPole-v1,169.07,0.000,0,"0/30 episodes reached 500"
+Model-M + FQI10,Grid5,-0.4341,1.000,0,"128/128 reached goal (matches tabular oracle)"
+Baseline-T + FQI10,Grid5,-0.6120,0.800,0,"102/128 reached goal"
+RankDistill (CPU 43 steps),CartPole-v1,21.67,0.000,43,"Synthetic held-out action acc=0.6111; probe=0.0%"

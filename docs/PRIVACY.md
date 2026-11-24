@@ -1,64 +1,45 @@
-# 隐私、最小权限与程序层拦截说明（v2.0.1 · 纯手动版）
+# 隐私、目录围栏与分层护栏说明（v3.0 · 强白名单可审计版）
 
-本系统采用 **「公共只读协议库 + 每人独立私有库（仅记录今日/本周科研进展摘要）」** 架构。**绝不自动触发、绝不改全局或项目 AI 规则、绝不静默上传**；一切同步完全由同学本人主动触发、先看明文再确认上传，并由以下程序层防线硬保底。
-
----
-
-## 一、六项核心隐私硬防线
-
-1. **零自动规则注入（不碰全局，也不改项目 `AGENTS.md`/`CLAUDE.md`）**：
-   - 初始化时**绝不写入** `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.gemini/GEMINI.md`、`~/.cursor/rules/`，也**不向项目目录写入自动收尾触发规则**。
-   - 平时所有对话 100% 不自动记录、不自动推送，彻底杜绝 AI 误判把非本课题对话带出去的可能。
-   - 同学每次安装须明确指定一个科研工作目录（`--project-dir`）加入**纯本地不上传**的 `~/.yao-research/local-policy.json`（权限 `0600`）；在任何非白名单目录运行 `preview` 或 `push` 会被程序直接拦截（退出码 `5`）。
-
-2. **最小数据化：只传「今日进展 / 本周进展」纯文本摘要**：
-   - 私有库路径白名单严格限定为：
-     - `README.md`、`.gitignore`、`profile.md`
-     - `progress/YYYY-MM-DD.md`（今日进展摘要）
-     - `weekly/YYYY-Www/meta.yaml`、`weekly/YYYY-Www/report.md`（及向后兼容历史 `evidence.md`、`judgment.md`）
-   - **拒收任何源码（`.py`/`.js`/`.ipynb`）、数据表（`.csv`/`.xlsx`/`.parquet`）、图片、PDF、压缩包、模型权重或未列明目录文件**；单文件硬上限为 **64 KiB**。
-   - **零本机环境遥测**：不上传主机名、操作系统版本、本机邮箱、工作目录绝对路径或 AI 工具列表；`profile.md` 仅留 GitHub ID（及本人选填的称呼/课题名）。
-
-3. **程序层双保险：原生 Git `pre-commit` 硬钩子**：
-   - 初始化时在 `~/.yao-research/repo/.git/hooks/pre-commit` 自动安装纯 Python3 硬钩子。每次提交只审计本次暂存的新增/修改文件，即使绕过 `yao_sync.py` 直接 `git commit` 也会拦截：
-     - 非白名单文件路径；
-     - 单文件大于 `64 KiB`；
-     - **外部本机路径扫描**：拦截正文中的 `/Users/...`、`/home/...`、`/Volumes/...`、`C:\Users\...`、`~/OneDrive`、`~/Desktop`、`~/Documents`、`~/Downloads`、`~/dev`、`~/Projects`、`OneDrive` 等本机路径；
-     - **密钥与个人身份信息（PII）扫描**：拦截私钥、GitHub/OpenAI/Anthropic/Bearer Token、带认证参数 URL、非 `noreply` 邮箱地址及 11 位中国大陆手机号。
-
-4. **完全手动触发：「主动整理 → 预览明文 → 确认后推」**：
-   - 仅当同学自己主动让 AI 整理当前目录的今日或本周进展时，才写入草稿并运行 `yao_sync.py preview`。
-   - `preview` 会将**本次即将上传的完整明文**展示给用户逐字审阅；`yao_sync.py push` 强制要求 `--confirm` 参数（未传则返回退出码 `6`），必须由同学明确点头后才提交推送。
-   - 同学可自行决定是否设置一个**纯本地提醒**（如系统日历或本地日程只提醒本人周一晚 7 点前手动整理周报，绝不自动执行上传）。
-
-5. **协作者最小授权与 GitHub 平台权限边界**：
-   - 支持 `--collaborators` 显式指定协作者（例如 `--collaborators taoyao2005` 仅邀请导师；默认从 `protocol/version.json` 读取 `taoyao2005` 与 `treerobin06`）。
-   - GitHub **组织库**自动限制为 `pull`（只读）；**GitHub 个人私有库**因平台接口限制仅支持标准协作者权限（`permission=pull` 会返回 HTTP 422，`yao_sync.py` 已做自动兼容回退，汇总脚本 `secretary_collect.py` 仅执行只读 `git pull`），本人可随时在 GitHub 仓库 `Settings -> Collaborators` 一键撤销授权。
-
-6. **绝不后台静默拉取并覆盖可执行脚本**：
-   - 绝不在后台自动 `git pull` 覆盖 `.py` 脚本。查看更新需显式运行 `yao_sync.py check-update`（只读查看更新内容）；仅当本人确认后再运行 `yao_sync.py upgrade`。
+v3.0 的设计原则是 **「硬围栏死锁在目录层级，内部科研资产放开审计，Tier-1 拦危险品、Tier-2 做质量提醒」**——既避免“全局自动偷传私人聊天”，也解决此前“卡死源码/图片/结果表导致全员写本机死链 `E:/...`、导师无法核查原始数据”的痛点。
 
 ---
 
-## 二、推荐叠加：宿主 AI 工具的推送权限锁（双保险）
+## 一、七项安全与隐私硬边界
 
-除脚本强制要求 `--confirm` 外，建议同时在所用 AI 工具里将推送命令设为“每次弹窗询问”，形成不依赖 AI 自觉的宿主级硬锁：
+1. **绝对零全局规则入侵（Zero Global Injection）**：
+   - 无论是 `--mode manual`（默认）还是 `--mode project-rule`，本工具**绝不读取、写入或追加** `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.gemini/GEMINI.md`、`~/.cursor/rules/` 等任何用户全局 AI 配置。
+   - 若选择 `--mode project-rule`，只会在**用户亲口指定的那 1 个白名单科研工作目录**内维护受控标记块 `<!-- BEGIN YAO-RESEARCH-HUB --> ... <!-- END YAO-RESEARCH-HUB -->`（`<project_dir>/AGENTS.md`）。台电脑上其他目录、课程、公司项目与私人对话完全不受影响。
 
-### Claude Code（`.claude/settings.local.json` 或 `~/.claude/settings.json`）
-```json
-{
-  "permissions": {
-    "ask": [
-      "Bash(python3 *yao_sync.py push*)",
-      "Bash(git -C ~/.yao-research/repo push*)"
-    ]
-  }
-}
-```
+2. **目录围栏（Hard Directory Jail）+ 防软链/路径穿越**：
+   - 授权目录列表严格保存在纯本地 `~/.yao-research/local-policy.json`（文件权限 `0600`，**永不提交到任何 Git 仓库**）。
+   - 每次执行 `attach`、`sync-code`、`upload`、`preview`、`push`，程序都会对来源工作目录以及**每一个待复制源文件的真实解析路径（`Path.resolve()`）**做严格公共前缀校验，同时明确拒绝符号链接（`is_symlink()`）与 `..` 越界——任何越出白名单目录的文件都会触发硬拦截（退出码 `5`）。
 
----
+3. **默认仅授权导师 `taoyao2005`（彻底移除默认第三方/秘书账号）**：
+   - 默认协作者仅 `[{"github": "taoyao2005", "role": "advisor"}]`。同学如有同课题组队互审需求，可自主运行 `init --collaborators taoyao2005,<teammate>` 添加队友，否则不向任何第三人开放仓库。
+   - **GitHub 平台权限诚实说明**：GitHub **组织仓库**支持 API 强制设置只读 `pull`；**个人账号私有仓库**因 GitHub 平台机制限制，`-f permission=pull` 会返回 HTTP `422 Cannot assign ... permission of read`。v3.0 自动识别该 422 响应并回退为标准协作者邀请，导师端 `advisor_collect.py` 仅执行只读 `git clone`/`git pull`，同学随时可在 GitHub 仓库 `Settings -> Collaborators` 一键移除任何协作者。
 
-## 三、诚实边界说明
+4. **全面放开可审计科研资产，不误杀代码与实验图**：
+   - **仓库允许路径**：`README.md`、`.gitignore`、`profile.md`、`progress/YYYY-MM-DD.md`、`weekly/YYYY-Www/{meta.yaml,evidence.md,judgment.md,report.md,artifacts/<...>}`、`code/<...>`、`sessions/YYYY-MM-DD*.md`、`projects/*.md`。
+   - **单文件上限**：放宽至 **10 MiB**，常规实验图表（`.png`/`.jpg`/`.webp`/`.gif`/`.pdf`）、实验结果表（`.csv`/`.tsv`/`.json`）及源代码均可在白名单内畅通上传。
+   - **无环境遥测**：依然不收集、不写入主机名、系统版本、本机邮箱或工作目录绝对路径到 `profile.md` 或 `meta.yaml`。
 
-- **能防住什么**：彻底杜绝静默自动触发、杜绝篡改全局或项目规则、杜绝非授权目录触发同步、杜绝源码/数据/大文件/密钥/带本机路径片段进入私有库、杜绝未经本人审阅明文的任何后台推送。
-- **技术上不能单靠正则识别什么**：如果用户在白名单项目里用不带路径的纯文字转述了敏感内容，正则无法凭语义分辨——因此本系统强制采用**“仅主动手动触发 + 每次推送前向本人展示仅几行的完整明文进展 + 本人确认后才推”**作为最终防线，并且仓库保持 `Private`（仅本人、导师与秘书只读可见）。
+5. **Tier-1 硬拦截（`audit_paths` 与 `.git/hooks/pre-commit` 双重生效）**：
+   - 即使绕过 `yao_sync.py` 直接 `git commit`，原生 `.git/hooks/pre-commit` 钩子也会硬性阻止以下内容进入提交历史：
+     - 仓库白名单之外的路径；
+     - 任何符号链接；
+     - 敏感文件名（`.env`、`.env.*`、`*.pem`、`*.key`、`*.p12`、`*.pfx`、`id_rsa*`、`*cookie*`、`*credential*`、`*secret*`、`all_keys.json`、`local-policy.json`）；
+     - 禁用大二进制、模型权重与环境缓存（`.pt`/`.pth`/`.ckpt`/`.safetensors`/`.onnx`/`.gguf`/`.h5`/`.hdf5`/`.parquet`/`.feather`/`.zip`/`.tar`/`.gz`/`.7z`/`.mp4`/`.db`/`.sqlite`，以及 `.venv`、`node_modules`、`__pycache__`、`wandb`、`mlruns`）；
+     - 超过 `10 MiB` 的单个文件；
+     - 非允许图片/PDF 的未知二进制文件或含空字节文件；
+     - 所有可读文本/代码行内匹配到的私钥头、GitHub Token（`gh*_*` / `github_pat_*`）、`sk-*` Key、`Bearer` Token 与带认证查询参数的签名 URL。
+
+6. **Tier-2 软审计提醒（输出 `[WARN]`，不阻塞提交）**：
+   - 在 Markdown 汇报文件（`progress/*.md`、`weekly/*/{evidence,judgment,report}.md`、`sessions/*.md`）中自动检查并发出 `[WARN]` 提醒：
+     - 正文出现 `/Users/...`、`E:/...`、`OneDrive` 等本机绝对路径死链（提醒用 `attach`/`sync-code` 上传后改相对路径）；
+     - 正文遗留 AI 对学生的提示语（如“本地审阅草稿”“先生成 diff 并由用户确认”“请确认是否上传”）；
+     - 汇报正文出现非 `noreply` 邮箱或 11 位中国大陆手机号（提醒本人确认是否有意保留）；
+     - `evidence.md` 超 `6,000` 字符或 `judgment.md` 超 `800` 字符 / 暂缺时提醒保持“≤2 页证据 + ≤300 字判断”。
+
+7. **`judgment.md` 本人确认红线 + 禁止静默覆盖脚本**：
+   - 如果采用 `--confirm-mode auto-in-allowlist`，白名单目录内日常进展、代码与 `artifacts/` 可无感自动提交推送；但**一旦改动涉及学生本人判断页 `weekly/*/judgment.md`**，代码层仍强制拦截（退出码 `6`）并要求显式加 `--confirm` 确认。
+   - 查看或升级协议中心代码需显式执行 `check-update` / `upgrade`，绝不在后台静默 `git pull` 篡改本地脚本。

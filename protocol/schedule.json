@@ -1,9 +1,9 @@
 {
-  "schema_version": "2.0.0",
+  "schema_version": "3.0.0",
   "timezone": "Asia/Shanghai",
   "utc_offset_hours": 8,
   "trial_weeks": 4,
-  "effective_from": "2026-11-24",
+  "effective_from": "2026-11-25",
   "bootstrap_week": {
     "week": "2026-W48",
     "window_start": "2026-11-24T00:00:00+08:00",
@@ -11,7 +11,7 @@
     "grace_end": "2026-11-25T23:59:59+08:00",
     "remind_only": true,
     "require_human_judgment": false,
-    "notes": "仅做窗口提醒与引导 preview -> 人工确认 -> push --confirm，绝不未经确认自动推送。"
+    "notes": "首周过渡期：支持仅传 evidence/report/artifacts，逐步对齐双轨（evidence.md + judgment.md）。"
   },
   "regular_weekly": {
     "enabled": true,
@@ -22,7 +22,7 @@
     "grace_hours_after": 24,
     "remind_only": true,
     "require_human_judgment": false,
-    "description": "常规周报窗口：每周一 19:00 截止，提前 48 小时开放提醒（周六 19:00 至周二 19:00），须用户确认明文预览后推送。"
+    "description": "常规周报窗口：每周一 19:00 截止（Asia/Shanghai），提前 48 小时开放提醒（周六 19:00 至周二 19:00），采用证据页 evidence.md + 本人判断页 judgment.md + 可审计附件 artifacts/ 双轨结构。"
   },
   "product_weekly": {
     "enabled": true,
@@ -37,21 +37,28 @@
       "time": "19:00",
       "event": "weekly_report_due",
       "owner": "all_students",
-      "description": "将本周 progress/ 摘要归纳为 weekly/<YYYY-Www>/report.md，经本人确认明文预览后推送。"
+      "description": "提交本周 weekly/<YYYY-Www>/{evidence.md,judgment.md,meta.yaml,artifacts/} 及关联 code/ 更新。"
     },
     {
       "day": "Tuesday",
       "time": "19:00",
       "event": "tuesday_routing_session",
       "owner": "routed_members_only",
-      "description": "90 分钟拆 4 段路由（1:1 或 2-4 人小组），未排到不参加。周四受评审的 2 个课题交预读。"
+      "description": "周二路由时段（1:1 或 2-4 人小组对齐），讨论人写的判断页与阻塞问题，未排到不参加。"
+    },
+    {
+      "day": "Wednesday",
+      "time": "19:00",
+      "event": "thursday_review_freeze",
+      "owner": "reviewed_phd_topics",
+      "description": "周四深度评审课题材料冻结（提前 24 小时同步预读文档与最新代码/图表到私有库/飞书）。"
     },
     {
       "day": "Thursday",
       "time": "19:00",
       "event": "thursday_deep_review",
       "owner": "external_scientists_phd_and_reviewed_masters",
-      "description": "75 分钟深度评审 2 个课题（提前 24h 冻结）+ 15 分钟研究决策。"
+      "description": "75 分钟深度评审 2 个核心课题 + 15 分钟研究优先级决策。"
     },
     {
       "day": "Saturday",

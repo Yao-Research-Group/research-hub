@@ -1,7 +1,7 @@
 {
-  "schema_version": "2.0.1",
-  "notebook_schema_version": 3,
-  "updated_at": "2026-11-24",
+  "schema_version": "3.0.0",
+  "notebook_schema_version": 4,
+  "updated_at": "2026-11-25",
   "hub_repo": "Yao-Research-Group/research-hub",
   "hub_branch": "main",
   "default_repo_name": "yao-research-memory",
@@ -11,16 +11,11 @@
       "github": "taoyao2005",
       "role": "advisor",
       "permission": "pull"
-    },
-    {
-      "github": "treerobin06",
-      "role": "secretary",
-      "permission": "pull"
     }
   ],
-  "current_week": "2026-W48",
+  "current_week": "2026-W49",
   "limits": {
-    "max_single_file_bytes": 65536,
+    "max_single_file_bytes": 10485760,
     "max_report_chars": 6000,
     "min_report_chars": 60
   },
@@ -30,7 +25,13 @@
     "profile.md",
     "progress/YYYY-MM-DD.md",
     "weekly/YYYY-Www/meta.yaml",
-    "weekly/YYYY-Www/report.md"
+    "weekly/YYYY-Www/evidence.md",
+    "weekly/YYYY-Www/judgment.md",
+    "weekly/YYYY-Www/report.md",
+    "weekly/YYYY-Www/artifacts/<subpath>",
+    "code/<subpath>",
+    "sessions/YYYY-MM-DD*.md",
+    "projects/*.md"
   ],
   "files": {
     "current": "protocol/CURRENT.md",
@@ -45,19 +46,26 @@
       "profile": "protocol/templates/profile.md",
       "daily_log": "protocol/templates/daily-log.md",
       "weekly_meta": "protocol/templates/weekly-meta.yaml",
+      "weekly_evidence": "protocol/templates/weekly-evidence.md",
+      "weekly_judgment": "protocol/templates/weekly-judgment.md",
       "weekly_report": "protocol/templates/weekly-report.md"
     }
   },
   "changelog": [
     {
+      "version": "3.0.0",
+      "date": "2026-11-25",
+      "summary": "Directory-jailed seamless research sync: default collaborator narrowed to advisor taoyao2005 only (removed secretary default), allowlist-jailed code/ and weekly/<W>/artifacts/ (figures/CSVs/PDFs up to 10 MiB) + sessions/, layered Tier-1 hard guardrails & Tier-2 dead-link/draft warnings, optional --mode project-rule (local AGENTS.md only, zero global touch) & --confirm-mode auto-in-allowlist (judgment.md still --confirm), dual-track weekly evidence+judgment alignment with 2026-11-24 advisor rules, and advisor_collect.py code-auditable digest."
+    },
+    {
       "version": "2.0.1",
       "date": "2026-11-24",
-      "summary": "Handle GitHub personal repo HTTP 422 fallback when assigning pull permission, add --collaborators option on init (e.g., --collaborators taoyao2005), and clarify personal vs org repo collaborator permissions in privacy docs."
+      "summary": "Handle GitHub personal repo HTTP 422 fallback when assigning pull permission, add --collaborators option on init, and clarify personal vs org repo collaborator permissions."
     },
     {
       "version": "2.0.0",
       "date": "2026-11-24",
-      "summary": "Privacy-first manual progress sync: zero agent-rule injection (no global or project auto-triggers), explicit --project-dir local allowlist, Git pre-commit hook scanning external paths/secrets/PII, 64KiB strict path allowlist, zero telemetry, read-only (pull) collaborators, mandatory preview + explicit --confirm before push, and no silent script updates."
+      "summary": "Privacy-first manual progress sync: zero global injection, explicit --project-dir allowlist, Git pre-commit guardrails, preview + --confirm gate."
     },
     {
       "version": "1.1.1",
