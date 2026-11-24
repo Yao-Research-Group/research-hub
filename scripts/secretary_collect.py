@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Secretary & advisor collector: accept private repo invites, sync spokes, and build digests + HTML report.
 
-Zero third-party dependencies (Python 3.9+ stdlib only).
-All file I/O explicitly specifies UTF-8 encoding.
+Supports both v1.1 (yao-research-memory, logs/, report.md) and v1.0 (yao-research-*, daily/, evidence+judgment).
+Zero third-party dependencies (Python 3.9+ stdlib only). All I/O explicitly uses UTF-8.
 """
 from __future__ import annotations
 
@@ -22,16 +22,21 @@ import urllib.request
 DEFAULT_HUB_REPO = "Yao-Research-Group/research-hub"
 DEFAULT_HUB_BRANCH = "main"
 
-BUILTIN_ADVISOR_PROMPT = """阅读这名学生的 evidence.md（证据页）、judgment.md（判断页）和 meta.yaml，输出：
-1. 3 行摘要：做了什么、证据是否充分、下一步是否清楚；
-2. 判断页每条结论在证据页是否有支持（有支持/部分支持/无支持）并指明位置；
-3. 学生没回答但应该回答的缺口；
-4. 最多 3 个最值得讨论的问题，按重要性排序（写成问题，不下结论）；
+BUILTIN_ADVISOR_PROMPT = """阅读这名学生的周报材料（report.md 或 evidence.md+judgment.md）与 meta.yaml，输出：
+1. 3 行摘要：本周做了什么、证据是否充分、下一步是否清楚；
+2. 证据与结论核查（有支持/部分支持/无支持）及失败尝试边界；
+3. 缺口与未回答问题；
+4. 最多 3 个最值得讨论的问题（写成问题，不下结论）；
 5. 建议路由（不需要开会/小组讨论/1:1/周四深度决策/周六产品评审）及理由。
-不写表扬与客套话，不确定处标明 [不确定]。
-读完全部学生后，另外输出：课题之间的重复/冲突/共同阻塞，以及按紧急程度排序的本周需要老师关注名单。"""
+不写表扬与客套话，不确定处标明 [不确定]。"""
 
-UNFILLED_JUDGMENT_TOKENS = ("<请用本人语言填写>", "<用一句话说清")
+UNFILLED_TOKENS = (
+    "<请用本人语言填写>",
+    "<用一句话说清",
+    "<概括本周最实质的推进",
+    "<实验协议、对照基线",
+    "<请由 AI 从实际日志",
+)
 
 
 def current_iso_week() -> str:
@@ -114,7 +119,11 @@ def upsert_roster_entry(entries: List[Dict[str, Any]], full_name: str, local_sou
     entries.append(entry)
 
 
-def accept_invites(ws: Path, prefix: str = "yao-research-") -> int:
+def is_research_repo_name(name: str) -> bool:
+    return name == "yao-research-memory" or name.startswith("yao-research-")
+
+
+def accept_invites(ws: Path) -> int:
     if not shutil.which("gh"):
         raise RuntimeError("需要 gh CLI 才能自动接收 GitHub 邀请。")
     raw = run_cmd(["gh", "api", "user/repository_invitations"]).stdout
@@ -125,7 +134,7 @@ def accept_invites(ws: Path, prefix: str = "yao-research-") -> int:
         repo = inv.get("repository", {})
         name = repo.get("name", "")
         full_name = repo.get("full_name", "")
-        if not name.startswith(prefix):
+        if not is_research_repo_name(name):
             continue
         if not repo.get("private", False):
             print(f"[skip] 忽略非私有仓库邀请：{full_name}")
@@ -165,8 +174,7 @@ def add_repos(ws: Path, repo_specs: List[str], skip_remote: bool) -> None:
 
 
 def spoke_dir_for(ws: Path, full_name: str) -> Path:
-    safe = full_name.replace("/", "__")
-    return ws / "spokes" / safe
+    return ws / "spokes" / full_name.replace("/", "__")
 
 
 def sync_spokes(ws: Path, skip_remote: bool) -> List[Tuple[str, Path]]:
@@ -217,7 +225,7 @@ def load_advisor_prompt(hub_dir: Optional[Path], hub_repo: str, hub_branch: str,
     if not skip_remote:
         try:
             url = f"https://raw.githubusercontent.com/{hub_repo}/{hub_branch}/{rel}"
-            req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/1.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/1.1"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.read().decode("utf-8")
         except Exception:
@@ -234,7 +242,7 @@ def strip_markdown_chrome(text: str) -> str:
             continue
         if re.match(r"^[0-9]+\.\s*\*\*.*\*\*：?$", s):
             continue
-        if s.startswith("- **提交人**") or s.startswith("- **填写要求**"):
+        if s.startswith("- **提交人**") or s.startswith("- **填写要求**") or s.startswith("- **要求**"):
             continue
         lines.append(s)
     return "\n".join(lines).strip()
@@ -268,42 +276,79 @@ def parse_project_cards(spoke_dir: Path) -> List[Dict[str, str]]:
     return cards
 
 
+def collect_recent_logs(spoke_dir: Path, limit: int = 3) -> Tuple[int, str, str]:
+    log_files: List[Path] = []
+    for folder in ("logs", "daily"):
+        d = spoke_dir / folder
+        if d.is_dir():
+            log_files.extend(p for p in d.glob("*.md") if p.is_file())
+    if not log_files:
+        return 0, "-", ""
+    log_files.sort(key=lambda p: p.name, reverse=True)
+    latest = log_files[0]
+    snippets: List[str] = []
+    for p in log_files[:limit]:
+        snippets.append(f"### {p.parent.name}/{p.name}\n{p.read_text(encoding='utf-8').strip()}")
+    return len(log_files), latest.stem, "\n\n".join(snippets)
+
+
 def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[str, Any]:
     profile_txt = (spoke_dir / "profile.md").read_text(encoding="utf-8") if (spoke_dir / "profile.md").is_file() else ""
+    nb_file = spoke_dir / ".yao-notebook.json"
+    nb: Dict[str, Any] = {}
+    if nb_file.is_file():
+        try:
+            nb = json.loads(nb_file.read_text(encoding="utf-8"))
+        except Exception:
+            nb = {}
+
     week_dir = spoke_dir / "weekly" / week
     meta_file = week_dir / "meta.yaml"
+    rep_file = week_dir / "report.md"
     ev_file = week_dir / "evidence.md"
     jd_file = week_dir / "judgment.md"
     prod_file = week_dir / "product.md"
 
     meta = parse_simple_yaml(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else {}
+    rep_txt = rep_file.read_text(encoding="utf-8") if rep_file.is_file() else ""
     ev_txt = ev_file.read_text(encoding="utf-8") if ev_file.is_file() else ""
     jd_txt = jd_file.read_text(encoding="utf-8") if jd_file.is_file() else ""
     prod_txt = prod_file.read_text(encoding="utf-8") if prod_file.is_file() else ""
 
-    ev_body = strip_markdown_chrome(ev_txt)
-    jd_body = strip_markdown_chrome(jd_txt)
-    jd_unfilled = any(tok in jd_txt for tok in UNFILLED_JUDGMENT_TOKENS)
+    has_rep = len(strip_markdown_chrome(rep_txt)) >= 80 and not any(t in rep_txt for t in UNFILLED_TOKENS)
+    has_ev = len(strip_markdown_chrome(ev_txt)) >= 80 and not any(t in ev_txt for t in UNFILLED_TOKENS)
+    has_jd = len(strip_markdown_chrome(jd_txt)) >= 40 and not any(t in jd_txt for t in UNFILLED_TOKENS)
 
-    has_ev = len(ev_body) >= 80
-    has_jd = (len(jd_body) >= 40) and not jd_unfilled
-
-    if has_ev and has_jd:
-        status = "submitted"
-    elif has_ev and not has_jd:
+    if has_ev and has_jd and ("AI_DRAFT_PENDING_HUMAN" not in jd_txt) and meta.get("judgment_status") != "ai_draft":
+        status = "submitted_human"
+    elif has_rep or (has_ev and has_jd):
+        status = "submitted_ai_mvp"
+    elif has_ev:
         status = "missing_judgment"
-    elif (not has_ev) and has_jd:
+    elif has_jd:
         status = "missing_evidence"
     else:
         status = "missing_all"
 
-    student_name = meta.get("student_name") or extract_bullet_field(profile_txt, "姓名", full_name.split("/")[-1])
+    nb_ident = nb.get("identity", {})
+    nb_env = nb.get("env", {})
+    gh_login = meta.get("github_login") or nb_ident.get("github_login") or full_name.split("/")[0]
+    disp = nb_ident.get("display_name") or ""
+    fallback_name = f"{disp} ({gh_login})" if disp and disp != gh_login else gh_login
+    student_name = meta.get("student_name") or extract_bullet_field(profile_txt, "姓名", "") or fallback_name
+    if student_name in {"", "-", "姓名"}:
+        student_name = fallback_name
+
     role = meta.get("role") or extract_bullet_field(profile_txt, "身份", "-")
-    topic = meta.get("topic") or extract_bullet_field(profile_txt, "主课题", "未分类")
-    code_repos = meta.get("code_repos") or extract_bullet_field(profile_txt, "关联代码仓库", "-")
+    topic = meta.get("topic") or extract_bullet_field(profile_txt, "主课题", "") or nb_env.get("last_project") or "未指定课题"
+    observed = nb.get("observed_code_repos", [])
+    code_repos = meta.get("code_repos") or (", ".join(observed) if observed else extract_bullet_field(profile_txt, "关联代码仓库", "-"))
+    env_summary = " / ".join(x for x in (nb_env.get("hostname"), nb_env.get("os"), nb_env.get("ai_tools")) if x) or "-"
+    log_count, latest_log_date, recent_logs_md = collect_recent_logs(spoke_dir)
 
     return {
         "repo": full_name,
+        "github_login": gh_login,
         "student_name": student_name,
         "role": role,
         "topic": topic,
@@ -314,14 +359,20 @@ def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[s
         "help_needed_what": meta.get("help_needed_what", "-"),
         "has_product_task": meta.get("has_product_task", "no"),
         "code_repos": code_repos,
+        "env_summary": env_summary,
+        "log_count": log_count,
+        "latest_log_date": latest_log_date,
         "submitted_at": meta.get("submitted_at", ""),
         "status": status,
+        "has_report": has_rep,
         "has_evidence": has_ev,
         "has_judgment": has_jd,
         "has_product_update": bool(prod_txt.strip()),
+        "report_md": rep_txt,
         "evidence_md": ev_txt,
         "judgment_md": jd_txt,
         "product_md": prod_txt,
+        "recent_logs_md": recent_logs_md,
         "project_cards": parse_project_cards(spoke_dir),
     }
 
@@ -338,7 +389,6 @@ def render_safe_markdown_html(md_text: str) -> str:
                 out_lines.append("</ul>")
                 in_list = False
             continue
-        # Inline formatting on escaped text
         fmt = re.sub(r"`([^`]+)`", r"<code>\1</code>", line)
         fmt = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", fmt)
 
@@ -377,9 +427,10 @@ def render_safe_markdown_html(md_text: str) -> str:
 
 def status_badge(status: str) -> Tuple[str, str]:
     mapping = {
-        "submitted": ("已齐备提交", "ok"),
-        "missing_judgment": ("缺本人判断页（视为未交）", "warn"),
-        "missing_evidence": ("缺 AI 证据页", "warn"),
+        "submitted_human": ("已齐备·本人确认", "ok"),
+        "submitted_ai_mvp": ("已提交·AI生成MVP", "ok"),
+        "missing_judgment": ("缺本人判断页", "warn"),
+        "missing_evidence": ("缺证据页", "warn"),
         "missing_all": ("尚未提交", "err"),
     }
     return mapping.get(status, (status, "warn"))
@@ -387,33 +438,32 @@ def status_badge(status: str) -> Tuple[str, str]:
 
 def build_team_digest_md(records: List[Dict[str, Any]], week: str) -> str:
     total = len(records)
-    submitted = sum(1 for r in records if r["status"] == "submitted")
-    missing_jd = sum(1 for r in records if r["status"] == "missing_judgment")
-    missing_all = sum(1 for r in records if r["status"] in ("missing_all", "missing_evidence"))
+    sub_human = sum(1 for r in records if r["status"] == "submitted_human")
+    sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
+    missing = total - sub_human - sub_ai
 
     lines = [
         f"# Yao Research Group 周报汇总（{week}）",
         "",
         f"- **生成时间**：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')}",
-        f"- **应交人数**：{total}｜**完整提交**：{submitted}｜**缺判断页（按未交）**：{missing_jd}｜**未交/缺证据**：{missing_all}",
+        f"- **已登记**：{total} 人｜**已提交**：{sub_human + sub_ai} 人（本人确认 {sub_human} / AI生成MVP {sub_ai}）｜**缺失/未交**：{missing} 人",
         "",
-        "## 1. 全员提交与会议路由总表",
+        "## 1. 全员提交与环境状态总表",
         "",
-        "| 姓名 | 身份 | 主课题 | 状态 | 会议请求 | 阻塞摘要 | 需协助方 | 私有库 |",
+        "| 成员 | 主课题 | 状态 | 最近日志 | 会议请求 | 阻塞摘要 | 环境/工具 | 私有库 |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in records:
         label, _ = status_badge(r["status"])
         lines.append(
-            f"| {r['student_name']} | {r['role']} | {r['topic']} | {label} | "
-            f"`{r['meeting_request']}` | {r['blockers_summary']} | {r['help_needed_from']} | `{r['repo']}` |"
+            f"| {r['student_name']} | {r['topic']} | {label} | {r['latest_log_date']} ({r['log_count']}) | "
+            f"`{r['meeting_request']}` | {r['blockers_summary']} | {r['env_summary']} | `{r['repo']}` |"
         )
 
     lines.extend(["", "## 2. 按课题与论文管线汇总", ""])
     topics: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
         topics.setdefault(r["topic"], []).append(r)
-
     for topic, group in topics.items():
         members = "、".join(g["student_name"] for g in group)
         lines.append(f"### 课题：{topic}（{members}）")
@@ -424,10 +474,11 @@ def build_team_digest_md(records: List[Dict[str, Any]], week: str) -> str:
                 )
         lines.append("")
 
-    lines.extend(["## 3. 全体学生判断页速览", ""])
+    lines.extend(["## 3. 本周周报正文速览", ""])
     for r in records:
         lines.append(f"### {r['student_name']}（{r['topic']}｜请求：`{r['meeting_request']}`）")
-        lines.append(r["judgment_md"].strip() or "*(未提交判断页)*")
+        primary = r["report_md"].strip() or r["judgment_md"].strip() or r["evidence_md"].strip()
+        lines.append(primary or "*(未提交周报正文)*")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -443,63 +494,62 @@ def build_preread_input_md(records: List[Dict[str, Any]], week: str, advisor_pro
         "",
         "---",
         "",
-        f"## 全体成员本周原始周报材料（共 {len(records)} 人）",
+        f"## 全体成员本周周报材料（共 {len(records)} 人）",
         "",
     ]
     for r in records:
         label, _ = status_badge(r["status"])
         lines.extend(
             [
-                f"### 学生：{r['student_name']} (`{r['repo']}`)",
-                f"- 状态：{label}｜身份：{r['role']}｜课题：{r['topic']}｜结对：{r['group_partner']}",
+                f"### 成员：{r['student_name']} (`{r['repo']}`)",
+                f"- 状态：{label}｜身份：{r['role']}｜课题：{r['topic']}｜最近日志：{r['latest_log_date']}（共 {r['log_count']} 份）",
                 f"- 会议请求：`{r['meeting_request']}`｜阻塞：{r['blockers_summary']}｜求助：{r['help_needed_from']} ({r['help_needed_what']})",
-                f"- 关联代码：{r['code_repos']}",
-                "",
-                "#### 本人判断页 (`judgment.md`)",
-                r["judgment_md"].strip() or "*(未提交)*",
-                "",
-                "#### AI 证据页 (`evidence.md`)",
-                r["evidence_md"].strip() or "*(未提交)*",
+                f"- 关联代码：{r['code_repos']}｜环境：{r['env_summary']}",
                 "",
             ]
         )
+        if r["report_md"].strip():
+            lines.extend(["#### 本周周报 (`report.md`)", r["report_md"].strip(), ""])
+        if r["judgment_md"].strip():
+            lines.extend(["#### 本人判断页 (`judgment.md`)", r["judgment_md"].strip(), ""])
+        if r["evidence_md"].strip():
+            lines.extend(["#### AI 证据页 (`evidence.md`)", r["evidence_md"].strip(), ""])
         if r["project_cards"]:
             lines.append("#### 项目活页卡摘要")
             for c in r["project_cards"]:
                 lines.append(f"- **{c['title']}** (阶段: {c['stage']} | 目标: {c['venue']} | 停止条件: {c['kill_criteria']})")
             lines.append("")
-        lines.append("---")
-        lines.append("")
+        lines.extend(["---", ""])
     return "\n".join(lines)
 
 
 def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
     total = len(records)
-    submitted = sum(1 for r in records if r["status"] == "submitted")
-    missing = total - submitted
+    sub_human = sum(1 for r in records if r["status"] == "submitted_human")
+    sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
+    missing = total - sub_human - sub_ai
     gen_time = html.escape(datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
     week_esc = html.escape(week)
 
-    # Tab 1: Judgments
-    judgment_cards_html: List[str] = []
+    overview_cards: List[str] = []
     for r in records:
         label, cls = status_badge(r["status"])
-        jd_body = render_safe_markdown_html(r["judgment_md"]) if r["has_judgment"] else "<p class='muted'>（尚未提交有效判断页）</p>"
-        judgment_cards_html.append(
+        primary_md = r["report_md"].strip() or r["judgment_md"].strip() or r["evidence_md"].strip()
+        body_html = render_safe_markdown_html(primary_md) if primary_md else "<p class='muted'>（本周尚未提交内容）</p>"
+        overview_cards.append(
             f"<article class='card'>"
             f"<div class='card-head'>"
-            f"<div><strong>{html.escape(r['student_name'])}</strong> <span class='tag'>{html.escape(r['role'])}</span> "
-            f"<span class='tag'>{html.escape(r['topic'])}</span></div>"
+            f"<div><strong>{html.escape(r['student_name'])}</strong> <span class='tag'>{html.escape(r['topic'])}</span> "
+            f"<span class='tag'>日志:{r['log_count']} ({html.escape(r['latest_log_date'])})</span></div>"
             f"<div><span class='badge {cls}'>{html.escape(label)}</span> "
-            f"<span class='tag'>会议请求: {html.escape(r['meeting_request'])}</span></div>"
+            f"<span class='tag'>请求: {html.escape(r['meeting_request'])}</span></div>"
             f"</div>"
             f"<div class='meta-line'><strong>阻塞：</strong>{html.escape(r['blockers_summary'])} ｜ "
-            f"<strong>求助：</strong>{html.escape(r['help_needed_from'])} ({html.escape(r['help_needed_what'])})</div>"
-            f"<div class='card-body'>{jd_body}</div>"
+            f"<strong>代码：</strong><code>{html.escape(r['code_repos'])}</code></div>"
+            f"<div class='card-body'>{body_html}</div>"
             f"</article>"
         )
 
-    # Tab 2: Topics & Pipeline
     topics: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
         topics.setdefault(r["topic"], []).append(r)
@@ -507,7 +557,7 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
     topic_blocks: List[str] = []
     for topic, grp in topics.items():
         names = ", ".join(html.escape(g["student_name"]) for g in grp)
-        topic_blocks.append(f"<div class='card'><h3>{html.escape(topic)}</h3><p>参与人：{names}</p></div>")
+        topic_blocks.append(f"<div class='card'><h3>{html.escape(topic)}</h3><p>参与成员：{names}</p></div>")
         for g in grp:
             for c in g["project_cards"]:
                 pipeline_rows.append(
@@ -521,34 +571,34 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
                     "</tr>"
                 )
 
-    # Tab 3: Full Archives
     archive_blocks: List[str] = []
     for r in records:
         label, cls = status_badge(r["status"])
-        ev_html = render_safe_markdown_html(r["evidence_md"])
-        jd_html = render_safe_markdown_html(r["judgment_md"])
-        prod_html = (
-            f"<details><summary>产品进展更新 (product.md)</summary><div class='details-box'>{render_safe_markdown_html(r['product_md'])}</div></details>"
-            if r["has_product_update"]
-            else ""
-        )
-        cards_html = "".join(
-            f"<details><summary>项目活页卡：{html.escape(c['title'])} ({html.escape(c['stage'])})</summary>"
-            f"<div class='details-box'>{render_safe_markdown_html(c['raw'])}</div></details>"
-            for c in r["project_cards"]
-        )
+        parts: List[str] = []
+        if r["report_md"].strip():
+            parts.append(f"<h4>本周周报 (report.md)</h4><div class='card-body'>{render_safe_markdown_html(r['report_md'])}</div>")
+        if r["judgment_md"].strip():
+            parts.append(f"<h4>判断页 (judgment.md)</h4><div class='card-body'>{render_safe_markdown_html(r['judgment_md'])}</div>")
+        if r["evidence_md"].strip():
+            parts.append(f"<details><summary>展开证据页 (evidence.md)</summary><div class='details-box'>{render_safe_markdown_html(r['evidence_md'])}</div></details>")
+        if r["recent_logs_md"].strip():
+            parts.append(f"<details><summary>展开最近日常日志 ({r['log_count']} 份)</summary><div class='details-box'>{render_safe_markdown_html(r['recent_logs_md'])}</div></details>")
+        if r["has_product_update"]:
+            parts.append(f"<details><summary>产品进展 (product.md)</summary><div class='details-box'>{render_safe_markdown_html(r['product_md'])}</div></details>")
+        for c in r["project_cards"]:
+            parts.append(
+                f"<details><summary>项目活页卡：{html.escape(c['title'])} ({html.escape(c['stage'])})</summary>"
+                f"<div class='details-box'>{render_safe_markdown_html(c['raw'])}</div></details>"
+            )
         archive_blocks.append(
             f"<article class='card'>"
             f"<div class='card-head'><div><strong>{html.escape(r['student_name'])}</strong> · <code>{html.escape(r['repo'])}</code></div>"
             f"<div><span class='badge {cls}'>{html.escape(label)}</span></div></div>"
-            f"<p class='meta-line'>代码库：<code>{html.escape(r['code_repos'])}</code> ｜ 提交时间：{html.escape(r['submitted_at'] or '-')}</p>"
-            f"<h4>本人判断页</h4><div class='card-body'>{jd_html}</div>"
-            f"<details><summary>展开 AI 证据页 (evidence.md)</summary><div class='details-box'>{ev_html}</div></details>"
-            f"{prod_html}{cards_html}"
+            f"<p class='meta-line'>环境：{html.escape(r['env_summary'])} ｜ 提交时间：{html.escape(r['submitted_at'] or '-')}</p>"
+            f"{''.join(parts) or '<p class=muted>暂无记录</p>'}"
             f"</article>"
         )
 
-    # Tab 4: Status Table
     status_rows: List[str] = []
     for r in records:
         label, cls = status_badge(r["status"])
@@ -557,8 +607,8 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
             f"<td>{html.escape(r['student_name'])}</td>"
             f"<td>{html.escape(r['topic'])}</td>"
             f"<td><span class='badge {cls}'>{html.escape(label)}</span></td>"
+            f"<td>{html.escape(r['latest_log_date'])} ({r['log_count']})</td>"
             f"<td><code>{html.escape(r['meeting_request'])}</code></td>"
-            f"<td>{html.escape(r['blockers_summary'])}</td>"
             f"<td>{html.escape(r['submitted_at'] or '-')}</td>"
             f"<td><code>{html.escape(r['repo'])}</code></td>"
             "</tr>"
@@ -603,7 +653,6 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
     body {{ background:#fff; padding:0; }}
     .tabs {{ display:none; }}
     .panel {{ display:block !important; margin-bottom:24px; }}
-    details {{ open:true; }}
   }}
 </style>
 </head>
@@ -611,24 +660,24 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
 <div class="wrap">
   <header>
     <h1>Yao Research Group 科研周报汇报 · {week_esc}</h1>
-    <div class="stats">生成时间：{gen_time} ｜ 已登记：{total} 人 ｜ 完整提交：{submitted} 人 ｜ 缺失/未交：{missing} 人</div>
+    <div class="stats">生成时间：{gen_time} ｜ 已登记：{total} 人 ｜ 已提交：{sub_human + sub_ai} 人（本人确认 {sub_human} / AI生成MVP {sub_ai}）｜ 缺失：{missing} 人</div>
   </header>
 
   <div class="tabs">
-    <button class="tab-btn active" onclick="showTab('tab-judgments', this)">1. 全部判断页速览</button>
+    <button class="tab-btn active" onclick="showTab('tab-judgments', this)">1. 本周周报速览</button>
     <button class="tab-btn" onclick="showTab('tab-topics', this)">2. 按课题与论文管线</button>
-    <button class="tab-btn" onclick="showTab('tab-archives', this)">3. 逐人完整档案（含证据页）</button>
+    <button class="tab-btn" onclick="showTab('tab-archives', this)">3. 逐人完整档案（含日常日志）</button>
     <button class="tab-btn" onclick="showTab('tab-status', this)">4. 提交状态与催收表</button>
   </div>
 
   <section id="tab-judgments" class="panel active">
-    {''.join(judgment_cards_html) or "<p class='muted'>暂无已同步仓库数据。</p>"}
+    {''.join(overview_cards) or "<p class='muted'>暂无已同步仓库数据。</p>"}
   </section>
 
   <section id="tab-topics" class="panel">
     <h2>论文管线与停止条件看板</h2>
     <table>
-      <thead><tr><th>姓名</th><th>项目卡</th><th>阶段</th><th>目标会议/节点</th><th>停止条件</th><th>更新</th></tr></thead>
+      <thead><tr><th>成员</th><th>项目卡</th><th>阶段</th><th>目标会议/节点</th><th>停止条件</th><th>更新</th></tr></thead>
       <tbody>{''.join(pipeline_rows) or "<tr><td colspan='6' class='muted'>暂无项目活页卡</td></tr>"}</tbody>
     </table>
     <h2>按课题分布</h2>
@@ -641,7 +690,7 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
 
   <section id="tab-status" class="panel">
     <table>
-      <thead><tr><th>姓名</th><th>主课题</th><th>状态</th><th>会议请求</th><th>阻塞</th><th>提交时间</th><th>仓库</th></tr></thead>
+      <thead><tr><th>成员</th><th>主课题</th><th>状态</th><th>最近日志</th><th>会议请求</th><th>提交时间</th><th>仓库</th></tr></thead>
       <tbody>{''.join(status_rows)}</tbody>
     </table>
   </section>
@@ -676,6 +725,7 @@ def generate_digests(
             records.append(
                 {
                     "repo": full_name,
+                    "github_login": full_name.split("/")[0],
                     "student_name": full_name.split("/")[-1],
                     "role": "-",
                     "topic": "未同步",
@@ -686,14 +736,20 @@ def generate_digests(
                     "help_needed_what": "-",
                     "has_product_task": "no",
                     "code_repos": "-",
+                    "env_summary": "-",
+                    "log_count": 0,
+                    "latest_log_date": "-",
                     "submitted_at": "",
                     "status": "missing_all",
+                    "has_report": False,
                     "has_evidence": False,
                     "has_judgment": False,
                     "has_product_update": False,
+                    "report_md": "",
                     "evidence_md": "",
                     "judgment_md": "",
                     "product_md": "",
+                    "recent_logs_md": "",
                     "project_cards": [],
                 }
             )
@@ -703,12 +759,16 @@ def generate_digests(
     out_dir = ws / "digests" / week
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    sub_human = sum(1 for r in records if r["status"] == "submitted_human")
+    sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
     status_payload = {
         "week": week,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "summary": {
             "total": len(records),
-            "submitted": sum(1 for r in records if r["status"] == "submitted"),
+            "submitted_total": sub_human + sub_ai,
+            "submitted_human": sub_human,
+            "submitted_ai_mvp": sub_ai,
             "missing_judgment": sum(1 for r in records if r["status"] == "missing_judgment"),
             "missing_evidence": sum(1 for r in records if r["status"] == "missing_evidence"),
             "missing_all": sum(1 for r in records if r["status"] == "missing_all"),
@@ -717,7 +777,7 @@ def generate_digests(
             {
                 k: v
                 for k, v in r.items()
-                if k not in {"evidence_md", "judgment_md", "product_md", "project_cards"}
+                if k not in {"report_md", "evidence_md", "judgment_md", "product_md", "recent_logs_md", "project_cards"}
             }
             for r in records
         ],

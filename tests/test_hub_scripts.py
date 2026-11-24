@@ -1,7 +1,10 @@
-"""Offline unit tests for Yao Research Hub scripts (stdlib unittest only)."""
+"""Offline unit tests for Yao Research Hub v1.1 (yao_sync.py + secretary_collect.py + legacy compat)."""
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,248 +17,294 @@ SCRIPTS_DIR = HUB_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import init_student  # noqa: E402
 import secretary_collect  # noqa: E402
-import sync_report  # noqa: E402
+import yao_sync  # noqa: E402
 
 
-class HubScriptsTests(unittest.TestCase):
+class HubV11Tests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="yao-hub-test-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="yao-hub-v11-"))
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_init_student_skeleton_and_idempotent_project_and_global_rules(self) -> None:
+    def test_zero_prompt_init_env_detection_and_idempotent_rules(self) -> None:
+        fake_home = self.tmp / "home"
+        (fake_home / ".claude").mkdir(parents=True)
+        (fake_home / ".codex").mkdir(parents=True)
+        (fake_home / ".cursor").mkdir(parents=True)
+        claude_md = fake_home / ".claude" / "CLAUDE.md"
+        claude_md.write_text("# User existing Claude rules\n", encoding="utf-8")
+
         repo_dir = self.tmp / "student_repo"
         proj_dir = self.tmp / "proj"
         proj_dir.mkdir(parents=True)
-        existing_agents = proj_dir / "AGENTS.md"
-        existing_agents.write_text("# My Existing Rules\nKeep this untouched.\n", encoding="utf-8")
 
-        rc = init_student.main(
-            [
-                "--name", "测试同学",
-                "--slug", "teststudent",
-                "--role", "phd",
-                "--topic", "MDP World Model",
-                "--project-dir", str(proj_dir),
-                "--repo-dir", str(repo_dir),
-                "--week", "2026-W48",
-                "--hub-dir", str(HUB_DIR),
-                "--skip-remote",
-            ]
-        )
-        self.assertEqual(rc, 0)
-        self.assertTrue((repo_dir / "profile.md").is_file())
-        self.assertTrue((repo_dir / "weekly" / "2026-W48" / "evidence.md").is_file())
-        self.assertTrue((repo_dir / "weekly" / "2026-W48" / "judgment.md").is_file())
-        self.assertTrue((repo_dir / "weekly" / "2026-W48" / "meta.yaml").is_file())
-        self.assertTrue((proj_dir / "CLAUDE.md").is_file())
-
-        agents_text = existing_agents.read_text(encoding="utf-8")
-        self.assertIn("Keep this untouched.", agents_text)
-        self.assertIn(init_student.BEGIN_MARKER, agents_text)
-
-        # Re-run to verify idempotency and non-overwrite of filled files
-        jd = repo_dir / "weekly" / "2026-W48" / "judgment.md"
-        jd.write_text("Custom user judgment preserved.", encoding="utf-8")
-        rc2 = init_student.main(
-            [
-                "--name", "测试同学",
-                "--slug", "teststudent",
-                "--project-dir", str(proj_dir),
-                "--repo-dir", str(repo_dir),
-                "--week", "2026-W48",
-                "--hub-dir", str(HUB_DIR),
-                "--skip-remote",
-            ]
-        )
-        self.assertEqual(rc2, 0)
-        self.assertEqual(jd.read_text(encoding="utf-8"), "Custom user judgment preserved.")
-        self.assertEqual(existing_agents.read_text(encoding="utf-8").count(init_student.BEGIN_MARKER), 1)
-
-        # Global marker test using temporary HOME override
-        fake_home = self.tmp / "fake_home"
-        (fake_home / ".claude").mkdir(parents=True)
-        claude_md = fake_home / ".claude" / "CLAUDE.md"
-        claude_md.write_text("# Personal global rules\n", encoding="utf-8")
-        old_home = Path.home()
-        import os
         prev_home = os.environ.get("HOME")
         os.environ["HOME"] = str(fake_home)
         try:
-            rc3 = init_student.main(
+            # 1) Zero-prompt global init
+            rc = yao_sync.main(
                 [
-                    "--name", "测试同学",
-                    "--slug", "teststudent",
-                    "--global",
+                    "init",
                     "--repo-dir", str(repo_dir),
-                    "--week", "2026-W48",
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--now", "2026-11-24T13:00:00+08:00",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue((repo_dir / ".yao-notebook.json").is_file())
+            self.assertTrue((repo_dir / "logs").is_dir())
+            self.assertTrue((repo_dir / "projects").is_dir())
+            self.assertTrue((repo_dir / "weekly").is_dir())
+
+            nb = json.loads((repo_dir / ".yao-notebook.json").read_text(encoding="utf-8"))
+            self.assertEqual(nb["schema_version"], 2)
+            self.assertIn("claude", nb["env"]["ai_tools"])
+            self.assertIn("codex", nb["env"]["ai_tools"])
+
+            c_txt = claude_md.read_text(encoding="utf-8")
+            self.assertIn("# User existing Claude rules", c_txt)
+            self.assertIn(yao_sync.BEGIN_MARKER, c_txt)
+            self.assertIn("适用范围", c_txt)
+            self.assertTrue((fake_home / ".codex" / "AGENTS.md").is_file())
+            self.assertTrue((fake_home / ".cursor" / "rules" / "yao-research-hub.mdc").is_file())
+
+            # Re-init is idempotent (exactly 1 marker block)
+            rc2 = yao_sync.main(
+                [
+                    "init",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--now", "2026-11-24T13:00:00+08:00",
+                ]
+            )
+            self.assertEqual(rc2, 0)
+            self.assertEqual(claude_md.read_text(encoding="utf-8").count(yao_sync.BEGIN_MARKER), 1)
+
+            # 2) Project-dir init injects into project AGENTS.md & CLAUDE.md
+            rc3 = yao_sync.main(
+                [
+                    "init",
+                    "--project-dir", str(proj_dir),
+                    "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
                     "--skip-remote",
                 ]
             )
             self.assertEqual(rc3, 0)
-            g_text = claude_md.read_text(encoding="utf-8")
-            self.assertIn("# Personal global rules", g_text)
-            self.assertIn("科研相关性过滤器", g_text)
+            self.assertTrue((proj_dir / "AGENTS.md").is_file())
+            self.assertTrue((proj_dir / "CLAUDE.md").is_file())
         finally:
             if prev_home is None:
                 os.environ.pop("HOME", None)
             else:
                 os.environ["HOME"] = prev_home
-            _ = old_home
 
-    def test_sync_report_gates_good_bad_secret_and_oversize(self) -> None:
-        repo_dir = self.tmp / "sync_repo"
-        cache_dir = self.tmp / "cache"
-        init_student.main(
+    def test_dynamic_schedule_preflight_and_push_gates_and_offline_queue(self) -> None:
+        repo_dir = self.tmp / "repo"
+        yao_sync.main(
             [
-                "--name", "张明",
-                "--slug", "zhangming",
-                "--topic", "Tabular MDP",
+                "init",
                 "--no-agent-md",
                 "--repo-dir", str(repo_dir),
-                "--week", "2026-W47",
                 "--hub-dir", str(HUB_DIR),
                 "--skip-remote",
             ]
         )
 
-        # 1) Unfilled template should FAIL weekly check
-        rc_unfilled = sync_report.main(
-            [
-                "--repo-dir", str(repo_dir),
-                "--mode", "weekly",
-                "--week", "2026-W47",
-                "--hub-dir", str(HUB_DIR),
-                "--cache-dir", str(cache_dir),
-                "--skip-remote",
-            ]
-        )
-        self.assertEqual(rc_unfilled, 4)
+        # In bootstrap_week window (2026-11-24 13:00) without report -> WEEKLY_REPORT_DUE
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            yao_sync.main(
+                [
+                    "preflight",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--json",
+                    "--now", "2026-11-24T13:00:00+08:00",
+                ]
+            )
+        pf1 = json.loads(buf.getvalue())
+        self.assertEqual(pf1["action"], "WEEKLY_REPORT_DUE")
+        self.assertEqual(pf1["active_week"], "2026-W48")
+        self.assertFalse(pf1["require_human_judgment"])
 
-        # 2) Bad example should also FAIL weekly check (missing 失败 section)
-        wdir = repo_dir / "weekly" / "2026-W47"
-        for fname in ("meta.yaml", "evidence.md", "judgment.md"):
-            shutil.copy2(HUB_DIR / "examples" / "bad-weekly-example" / fname, wdir / fname)
-        rc_bad = sync_report.main(
+        # Outside window (2026-11-26 10:00, Thursday morning) -> NONE
+        buf2 = io.StringIO()
+        with redirect_stdout(buf2):
+            yao_sync.main(
+                [
+                    "preflight",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--json",
+                    "--now", "2026-11-26T10:00:00+08:00",
+                ]
+            )
+        pf2 = json.loads(buf2.getvalue())
+        self.assertEqual(pf2["action"], "NONE")
+
+        # Regular Monday window (2026-11-30 12:00 is Monday before 18:00 deadline, week 2026-W49)
+        buf3 = io.StringIO()
+        with redirect_stdout(buf3):
+            yao_sync.main(
+                [
+                    "preflight",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--json",
+                    "--now", "2026-11-30T12:00:00+08:00",
+                ]
+            )
+        pf3 = json.loads(buf3.getvalue())
+        self.assertEqual(pf3["action"], "WEEKLY_REPORT_DUE")
+        self.assertEqual(pf3["active_week"], "2026-W49")
+
+        # Push bad weekly report (missing 失败) should BLOCK (exit 4)
+        w48 = repo_dir / "weekly" / "2026-W48"
+        w48.mkdir(parents=True, exist_ok=True)
+        (w48 / "report.md").write_text("# 本周周报\n\n本周工作顺利推进，效果很好，完成若干模块重构与代码优化任务。" * 3, encoding="utf-8")
+        rc_bad = yao_sync.main(
             [
+                "push",
                 "--repo-dir", str(repo_dir),
-                "--mode", "weekly",
-                "--week", "2026-W47",
                 "--hub-dir", str(HUB_DIR),
-                "--cache-dir", str(cache_dir),
+                "--mode", "weekly",
+                "--week", "2026-W48",
                 "--skip-remote",
             ]
         )
         self.assertEqual(rc_bad, 4)
 
-        # 3) Good example should PASS and commit cleanly with --push --skip-remote
-        for fname in ("meta.yaml", "evidence.md", "judgment.md"):
-            shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / fname, wdir / fname)
-        rc_good = sync_report.main(
+        # Push good v1.1 AI MVP report.md should PASS and auto-create meta.yaml + commit
+        shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / "report.md", w48 / "report.md")
+        rc_good = yao_sync.main(
             [
+                "push",
                 "--repo-dir", str(repo_dir),
-                "--mode", "weekly",
-                "--week", "2026-W47",
                 "--hub-dir", str(HUB_DIR),
-                "--cache-dir", str(cache_dir),
+                "--mode", "weekly",
+                "--week", "2026-W48",
                 "--skip-remote",
-                "--push",
             ]
         )
         self.assertEqual(rc_good, 0)
-        self.assertTrue((cache_dir / "protocol" / "version.json").is_file())
-        meta = sync_report.parse_simple_yaml((wdir / "meta.yaml").read_text(encoding="utf-8"))
-        self.assertTrue(bool(meta.get("submitted_at")))
+        self.assertTrue((w48 / "meta.yaml").is_file())
 
-        # 4) Secret token should BLOCK
-        secret_note = repo_dir / "daily" / "2026-11-24.md"
+        # Re-run preflight inside 2026-W48 window -> now action is NONE and git status stays clean!
+        buf4 = io.StringIO()
+        with redirect_stdout(buf4):
+            yao_sync.main(
+                [
+                    "preflight",
+                    "--repo-dir", str(repo_dir),
+                    "--hub-dir", str(HUB_DIR),
+                    "--skip-remote",
+                    "--json",
+                    "--now", "2026-11-24T13:00:00+08:00",
+                ]
+            )
+        pf4 = json.loads(buf4.getvalue())
+        self.assertEqual(pf4["action"], "NONE")
+        self.assertEqual(pf4["submission_state"], "submitted_ai_mvp")
+        st_after_preflight = subprocess.run(
+            ["git", "-C", str(repo_dir), "status", "--porcelain"],
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(st_after_preflight, "")
+
+        # Secret scan gate blocks leaked token
         fake_tok = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
-        secret_note.write_text(f"leaked token: {fake_tok}\n", encoding="utf-8")
-        rc_sec = sync_report.main(
+        (repo_dir / "logs" / "2026-11-24.md").write_text(f"token: {fake_tok}\n", encoding="utf-8")
+        rc_sec = yao_sync.main(
             [
+                "push",
                 "--repo-dir", str(repo_dir),
-                "--mode", "daily",
                 "--hub-dir", str(HUB_DIR),
-                "--cache-dir", str(cache_dir),
+                "--mode", "daily",
                 "--skip-remote",
             ]
         )
         self.assertEqual(rc_sec, 3)
-        secret_note.unlink()
+        (repo_dir / "logs" / "2026-11-24.md").write_text("# 2026-11-24\n- 完成测试验证。\n", encoding="utf-8")
 
-        # 5) Oversize file (>2MiB) should BLOCK
-        big_file = repo_dir / "daily" / "huge.csv"
-        big_file.write_bytes(b"a,b\n" + b"1,2\n" * 600000)
-        rc_big = sync_report.main(
+        # Offline resilience: broken local remote still commits cleanly and returns 0
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "remote", "add", "origin", str(self.tmp / "nonexistent-remote.git")],
+            check=True,
+        )
+        rc_offline = yao_sync.main(
             [
+                "push",
                 "--repo-dir", str(repo_dir),
-                "--mode", "daily",
                 "--hub-dir", str(HUB_DIR),
-                "--cache-dir", str(cache_dir),
-                "--skip-remote",
+                "--mode", "daily",
             ]
         )
-        self.assertEqual(rc_big, 3)
+        self.assertEqual(rc_offline, 0)
 
-    def test_secretary_collect_mixed_statuses_and_xss_escape(self) -> None:
-        # Student 1: complete good submission + XSS payload test in judgment
+    def test_secretary_collect_hybrid_v10_and_v11_and_xss_escape(self) -> None:
+        # Student 1: v1.1 AI MVP report.md without manual Chinese name, plus XSS probe
         s1 = self.tmp / "s1"
-        init_student.main(
+        yao_sync.main(
             [
-                "--name", "学生甲",
-                "--slug", "s1",
-                "--topic", "PFN决策",
+                "init",
                 "--no-agent-md",
                 "--repo-dir", str(s1),
-                "--week", "2026-W48",
                 "--hub-dir", str(HUB_DIR),
                 "--skip-remote",
             ]
         )
-        for fname in ("meta.yaml", "evidence.md", "judgment.md"):
-            shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / fname, s1 / "weekly" / "2026-W48" / fname)
-        # Replace week to 2026-W48 and inject XSS probe
-        meta_p = s1 / "weekly" / "2026-W48" / "meta.yaml"
-        meta_p.write_text(
-            meta_p.read_text(encoding="utf-8").replace("2026-W47", "2026-W48").replace("张明（示例）", "学生甲"),
-            encoding="utf-8",
-        )
-        jd_p = s1 / "weekly" / "2026-W48" / "judgment.md"
-        jd_p.write_text(
-            jd_p.read_text(encoding="utf-8") + "\n<script>alert('xss')</script>\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "-C", str(s1), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(s1), "commit", "-m", "init s1"], check=True, capture_output=True)
-
-        # Student 2: missing judgment (template untouched)
-        s2 = self.tmp / "s2"
-        init_student.main(
+        (s1 / "logs" / "2026-11-24.md").write_text("- [12:00 | proj | main] 完成基准评测。\n", encoding="utf-8")
+        w1 = s1 / "weekly" / "2026-W48"
+        w1.mkdir(parents=True, exist_ok=True)
+        rep_txt = (HUB_DIR / "examples" / "good-weekly-example" / "report.md").read_text(encoding="utf-8")
+        (w1 / "report.md").write_text(rep_txt + "\n<script>alert('xss')</script>\n", encoding="utf-8")
+        yao_sync.main(
             [
-                "--name", "学生乙",
-                "--slug", "s2",
-                "--topic", "广告决策",
+                "push",
+                "--repo-dir", str(s1),
+                "--hub-dir", str(HUB_DIR),
+                "--mode", "weekly",
+                "--week", "2026-W48",
+                "--skip-remote",
+            ]
+        )
+
+        # Student 2: v1.0 legacy human-verified evidence.md + judgment.md
+        s2 = self.tmp / "s2"
+        yao_sync.main(
+            [
+                "init",
                 "--no-agent-md",
                 "--repo-dir", str(s2),
-                "--week", "2026-W48",
                 "--hub-dir", str(HUB_DIR),
                 "--skip-remote",
             ]
         )
-        shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / "evidence.md", s2 / "weekly" / "2026-W48" / "evidence.md")
+        w2 = s2 / "weekly" / "2026-W48"
+        w2.mkdir(parents=True, exist_ok=True)
+        for fname in ("evidence.md", "judgment.md", "meta.yaml"):
+            shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / fname, w2 / fname)
+        (w2 / "meta.yaml").write_text(
+            (w2 / "meta.yaml").read_text(encoding="utf-8").replace("2026-W47", "2026-W48").replace("张明（示例）", "学生乙"),
+            encoding="utf-8",
+        )
         subprocess.run(["git", "-C", str(s2), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(s2), "commit", "-m", "init s2"], check=True, capture_output=True)
 
-        ws = self.tmp / "secretary_ws"
+        ws = self.tmp / "sec_ws"
         rc = secretary_collect.main(
             [
                 "--workspace", str(ws),
-                "--add-repo", f"alice/yao-research-s1={s1}",
-                "--add-repo", f"bob/yao-research-s2={s2}",
+                "--add-repo", f"alice/yao-research-memory={s1}",
+                "--add-repo", f"bob/yao-research-bob={s2}",
                 "--sync",
                 "--digest",
                 "--week", "2026-W48",
@@ -265,21 +314,19 @@ class HubScriptsTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0)
 
-        out_dir = ws / "digests" / "2026-W48"
-        status = json.loads((out_dir / "status.json").read_text(encoding="utf-8"))
+        out = ws / "digests" / "2026-W48"
+        status = json.loads((out / "status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["summary"]["total"], 2)
-        self.assertEqual(status["summary"]["submitted"], 1)
-        self.assertEqual(status["summary"]["missing_judgment"], 1)
+        self.assertEqual(status["summary"]["submitted_total"], 2)
+        self.assertEqual(status["summary"]["submitted_ai_mvp"], 1)
+        self.assertEqual(status["summary"]["submitted_human"], 1)
 
-        html_text = (out_dir / "advisor-report.html").read_text(encoding="utf-8")
+        html_text = (out / "advisor-report.html").read_text(encoding="utf-8")
         self.assertNotIn("<script>alert('xss')</script>", html_text)
         self.assertIn("&lt;script&gt;alert", html_text)
-        self.assertIn("学生甲", html_text)
         self.assertIn("学生乙", html_text)
-
-        preread_text = (out_dir / "advisor-preread-input.md").read_text(encoding="utf-8")
-        self.assertIn("结论-证据一致性核查", preread_text)
-        self.assertIn("学生甲", preread_text)
+        self.assertIn("已提交·AI生成MVP", html_text)
+        self.assertIn("已齐备·本人确认", html_text)
 
 
 if __name__ == "__main__":

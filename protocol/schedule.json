@@ -1,14 +1,35 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
   "timezone": "Asia/Shanghai",
+  "utc_offset_hours": 8,
   "trial_weeks": 4,
   "effective_from": "2026-11-24",
   "bootstrap_week": {
     "week": "2026-W48",
-    "report_deadline": "2026-11-24T16:00:00+08:00",
-    "tuesday_meeting": "2026-11-24T19:00:00+08:00",
-    "tuesday_format": "all_members_transition_kickoff",
-    "notes": "本周二先按全员提交+今晚统一启动；从下周起启用周二路由制与提前24小时冻结机制。"
+    "window_start": "2026-11-24T00:00:00+08:00",
+    "deadline": "2026-11-24T16:00:00+08:00",
+    "grace_end": "2026-11-25T23:59:59+08:00",
+    "auto_push_on_install": true,
+    "require_human_judgment": false,
+    "notes": "首日上线窗口：安装完成后由 AI 直接基于当前工作区与提交客观生成本周 report.md 并推送；不强制人工手写判断页。"
+  },
+  "regular_weekly": {
+    "enabled": true,
+    "deadline_weekday": 0,
+    "deadline_hour": 18,
+    "deadline_minute": 0,
+    "window_hours_before": 48,
+    "grace_hours_after": 24,
+    "auto_push_on_window": true,
+    "require_human_judgment": false,
+    "description": "常规周报窗口：每周一 18:00 截止，提前 48 小时开放（周六 18:00 至周二 18:00）。"
+  },
+  "product_weekly": {
+    "enabled": true,
+    "deadline_weekday": 4,
+    "deadline_hour": 21,
+    "deadline_minute": 0,
+    "window_hours_before": 36
   },
   "weekly_rhythm": [
     {
@@ -16,43 +37,28 @@
       "time": "18:00",
       "event": "weekly_report_due",
       "owner": "all_students",
-      "description": "提交 weekly/<YYYY-Www>/{meta.yaml, evidence.md, judgment.md}；缺 judgment.md 视为未提交。"
-    },
-    {
-      "day": "Monday_to_Tuesday",
-      "time": "18:00-18:00",
-      "event": "ai_preread_and_routing",
-      "owner": "secretary_and_advisor",
-      "description": "AI 预读全部周报，秘书排出周二路由时段与周四决策事项，老师异步在 reviews/ 批示。"
+      "description": "AI 自动在对话收尾汇总本周 logs/ 与代码提交，生成 weekly/<YYYY-Www>/report.md 并同步。"
     },
     {
       "day": "Tuesday",
       "time": "19:00",
       "event": "tuesday_routing_session",
       "owner": "routed_members_only",
-      "description": "90分钟拆4个约20分钟时段，只用于1:1或2-4人小组阻塞排查，未被排到不参会。同时周四受评审的2个课题提交预读材料。"
+      "description": "90 分钟拆 4 段路由（1:1 或 2-4 人小组），未排到不参加。周四受评审的 2 个课题交预读。"
     },
     {
       "day": "Thursday",
       "time": "19:00",
       "event": "thursday_deep_review",
       "owner": "external_scientists_phd_and_reviewed_masters",
-      "description": "75分钟：2个课题深度评审（5分钟陈述+25分钟讨论）+15分钟研究决策。进度在周三19:00前（提前24h）冻结。"
-    },
-    {
-      "day": "Friday",
-      "time": "21:00",
-      "event": "product_update_due",
-      "owner": "phd_and_product_team",
-      "description": "有产品任务的成员更新 weekly/<YYYY-Www>/product.md。"
+      "description": "75 分钟深度评审 2 个课题（提前 24h 冻结）+ 15 分钟研究决策。"
     },
     {
       "day": "Saturday",
       "time": "21:00",
       "event": "saturday_product_review",
       "owner": "product_group_and_phd",
-      "description": "60分钟：20分钟可演示Demo展示+25分钟产品决策+15分钟下周交付物对齐（每月最后一个周六为联合演示日）。"
+      "description": "60 分钟产品演示与交付对齐。"
     }
-  ],
-  "freeze_rule": "任何受评审材料须至少提前 24 小时冻结并完成提交；临时新增进度不带入当场会议。"
+  ]
 }

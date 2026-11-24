@@ -1,9 +1,11 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "1.1.0",
+  "notebook_schema_version": 2,
   "updated_at": "2026-11-24",
   "hub_repo": "Yao-Research-Group/research-hub",
   "hub_branch": "main",
-  "repo_prefix": "yao-research-",
+  "default_repo_name": "yao-research-memory",
+  "legacy_repo_prefix": "yao-research-",
   "required_collaborators": [
     {
       "github": "taoyao2005",
@@ -17,40 +19,41 @@
     }
   ],
   "current_week": "2026-W48",
-  "current_deadline": "2026-11-24T16:00:00+08:00",
-  "default_weekly_deadline": "Monday 18:00 Asia/Shanghai",
-  "default_product_deadline": "Friday 21:00 Asia/Shanghai",
   "limits": {
     "max_single_file_bytes": 2097152,
+    "max_report_chars": 6000,
     "max_evidence_chars": 6000,
     "max_judgment_chars": 800,
-    "min_judgment_chars": 40,
-    "max_project_card_lines": 80,
-    "max_ai_review_questions": 3
+    "min_report_chars": 80,
+    "max_project_card_lines": 80
   },
   "files": {
-    "instructions": "protocol/agent-instructions.md",
+    "current": "protocol/CURRENT.md",
     "schedule": "protocol/schedule.json",
     "prompts": {
+      "advisor_preread": "protocol/prompts/advisor-preread.md",
       "student_evidence": "protocol/prompts/student-evidence.md",
-      "student_judgment_guide": "protocol/prompts/student-judgment-guide.md",
-      "advisor_preread": "protocol/prompts/advisor-preread.md"
+      "student_judgment_guide": "protocol/prompts/student-judgment-guide.md"
     },
     "templates": {
       "profile": "protocol/templates/profile.md",
       "project_card": "protocol/templates/project-card.md",
       "daily_log": "protocol/templates/daily-log.md",
       "weekly_meta": "protocol/templates/weekly-meta.yaml",
-      "weekly_evidence": "protocol/templates/weekly-evidence.md",
-      "weekly_judgment": "protocol/templates/weekly-judgment.md",
+      "weekly_report": "protocol/templates/weekly-report.md",
       "weekly_product": "protocol/templates/weekly-product.md"
     }
   },
   "changelog": [
     {
+      "version": "1.1.0",
+      "date": "2026-11-24",
+      "summary": "Zero-prompt init (yao-research-memory), git-pull self-updating hub, schedule-driven pure AI MVP weekly report, offline queue, and transparent receipt."
+    },
+    {
       "version": "1.0.0",
       "date": "2026-11-24",
-      "summary": "Initial release of Public Hub + Private Student Spoke architecture with evidence/judgment split and dynamic protocol checks."
+      "summary": "Initial release of Public Hub + Private Student Spoke architecture."
     }
   ]
 }
