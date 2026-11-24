@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Secretary & advisor collector: accept private repo invites, sync spokes, and build digests + HTML report.
+"""Secretary & advisor collector (v2.0): accept private repo invites, sync spokes, and build digests + HTML report.
 
-Supports both v1.1 (yao-research-memory, logs/, report.md) and v1.0 (yao-research-*, daily/, evidence+judgment).
+Supports v2.0 (progress/, report.md, zero telemetry) as well as v1.x (logs/, daily/, evidence+judgment).
 Zero third-party dependencies (Python 3.9+ stdlib only). All I/O explicitly uses UTF-8.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ import urllib.request
 DEFAULT_HUB_REPO = "Yao-Research-Group/research-hub"
 DEFAULT_HUB_BRANCH = "main"
 
-BUILTIN_ADVISOR_PROMPT = """阅读这名学生的周报材料（report.md 或 evidence.md+judgment.md）与 meta.yaml，输出：
+BUILTIN_ADVISOR_PROMPT = """阅读这名学生的今日进展（progress/）与本周周报（report.md 或 evidence.md+judgment.md），输出：
 1. 3 行摘要：本周做了什么、证据是否充分、下一步是否清楚；
 2. 证据与结论核查（有支持/部分支持/无支持）及失败尝试边界；
 3. 缺口与未回答问题；
@@ -36,6 +36,7 @@ UNFILLED_TOKENS = (
     "<概括本周最实质的推进",
     "<实验协议、对照基线",
     "<请由 AI 从实际日志",
+    "<用 1–3 句写清动作",
 )
 
 
@@ -225,7 +226,7 @@ def load_advisor_prompt(hub_dir: Optional[Path], hub_repo: str, hub_branch: str,
     if not skip_remote:
         try:
             url = f"https://raw.githubusercontent.com/{hub_repo}/{hub_branch}/{rel}"
-            req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/1.1"})
+            req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/2.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.read().decode("utf-8")
         except Exception:
@@ -276,48 +277,40 @@ def parse_project_cards(spoke_dir: Path) -> List[Dict[str, str]]:
     return cards
 
 
-def collect_recent_logs(spoke_dir: Path, limit: int = 3) -> Tuple[int, str, str]:
-    log_files: List[Path] = []
-    for folder in ("logs", "daily"):
+def collect_recent_progress(spoke_dir: Path, limit: int = 5) -> Tuple[int, str, str]:
+    """Read v2.0 progress/*.md first, falling back to legacy logs/ and daily/."""
+    entries: List[Path] = []
+    for folder in ("progress", "logs", "daily"):
         d = spoke_dir / folder
         if d.is_dir():
-            log_files.extend(p for p in d.glob("*.md") if p.is_file())
-    if not log_files:
+            entries.extend(p for p in d.glob("*.md") if p.is_file())
+    if not entries:
         return 0, "-", ""
-    log_files.sort(key=lambda p: p.name, reverse=True)
-    latest = log_files[0]
+    entries.sort(key=lambda p: p.name, reverse=True)
+    latest = entries[0]
     snippets: List[str] = []
-    for p in log_files[:limit]:
+    for p in entries[:limit]:
         snippets.append(f"### {p.parent.name}/{p.name}\n{p.read_text(encoding='utf-8').strip()}")
-    return len(log_files), latest.stem, "\n\n".join(snippets)
+    return len(entries), latest.stem, "\n\n".join(snippets)
 
 
 def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[str, Any]:
     profile_txt = (spoke_dir / "profile.md").read_text(encoding="utf-8") if (spoke_dir / "profile.md").is_file() else ""
-    nb_file = spoke_dir / ".yao-notebook.json"
-    nb: Dict[str, Any] = {}
-    if nb_file.is_file():
-        try:
-            nb = json.loads(nb_file.read_text(encoding="utf-8"))
-        except Exception:
-            nb = {}
-
     week_dir = spoke_dir / "weekly" / week
     meta_file = week_dir / "meta.yaml"
     rep_file = week_dir / "report.md"
     ev_file = week_dir / "evidence.md"
     jd_file = week_dir / "judgment.md"
-    prod_file = week_dir / "product.md"
 
     meta = parse_simple_yaml(meta_file.read_text(encoding="utf-8")) if meta_file.is_file() else {}
     rep_txt = rep_file.read_text(encoding="utf-8") if rep_file.is_file() else ""
     ev_txt = ev_file.read_text(encoding="utf-8") if ev_file.is_file() else ""
     jd_txt = jd_file.read_text(encoding="utf-8") if jd_file.is_file() else ""
-    prod_txt = prod_file.read_text(encoding="utf-8") if prod_file.is_file() else ""
 
-    has_rep = len(strip_markdown_chrome(rep_txt)) >= 80 and not any(t in rep_txt for t in UNFILLED_TOKENS)
-    has_ev = len(strip_markdown_chrome(ev_txt)) >= 80 and not any(t in ev_txt for t in UNFILLED_TOKENS)
+    has_rep = len(strip_markdown_chrome(rep_txt)) >= 60 and not any(t in rep_txt for t in UNFILLED_TOKENS)
+    has_ev = len(strip_markdown_chrome(ev_txt)) >= 60 and not any(t in ev_txt for t in UNFILLED_TOKENS)
     has_jd = len(strip_markdown_chrome(jd_txt)) >= 40 and not any(t in jd_txt for t in UNFILLED_TOKENS)
+    log_count, latest_log_date, recent_progress_md = collect_recent_progress(spoke_dir)
 
     if has_ev and has_jd and ("AI_DRAFT_PENDING_HUMAN" not in jd_txt) and meta.get("judgment_status") != "ai_draft":
         status = "submitted_human"
@@ -327,24 +320,24 @@ def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[s
         status = "missing_judgment"
     elif has_jd:
         status = "missing_evidence"
+    elif log_count > 0:
+        status = "progress_only"
     else:
         status = "missing_all"
 
-    nb_ident = nb.get("identity", {})
-    nb_env = nb.get("env", {})
-    gh_login = meta.get("github_login") or nb_ident.get("github_login") or full_name.split("/")[0]
-    disp = nb_ident.get("display_name") or ""
-    fallback_name = f"{disp} ({gh_login})" if disp and disp != gh_login else gh_login
-    student_name = meta.get("student_name") or extract_bullet_field(profile_txt, "姓名", "") or fallback_name
+    gh_login = meta.get("github_login") or extract_bullet_field(profile_txt, "GitHub ID", "") or full_name.split("/")[0]
+    prof_name = extract_bullet_field(profile_txt, "称呼", "") or extract_bullet_field(profile_txt, "姓名", "")
+    if prof_name in {"待补充", "-", "姓名"}:
+        prof_name = ""
+    student_name = meta.get("student_name") or prof_name or gh_login
     if student_name in {"", "-", "姓名"}:
-        student_name = fallback_name
+        student_name = gh_login
 
     role = meta.get("role") or extract_bullet_field(profile_txt, "身份", "-")
-    topic = meta.get("topic") or extract_bullet_field(profile_txt, "主课题", "") or nb_env.get("last_project") or "未指定课题"
-    observed = nb.get("observed_code_repos", [])
-    code_repos = meta.get("code_repos") or (", ".join(observed) if observed else extract_bullet_field(profile_txt, "关联代码仓库", "-"))
-    env_summary = " / ".join(x for x in (nb_env.get("hostname"), nb_env.get("os"), nb_env.get("ai_tools")) if x) or "-"
-    log_count, latest_log_date, recent_logs_md = collect_recent_logs(spoke_dir)
+    prof_topic = extract_bullet_field(profile_txt, "主课题", "")
+    if prof_topic in {"待补充", "-"}:
+        prof_topic = ""
+    topic = meta.get("topic") or prof_topic or "未指定课题"
 
     return {
         "repo": full_name,
@@ -358,8 +351,6 @@ def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[s
         "help_needed_from": meta.get("help_needed_from", "-"),
         "help_needed_what": meta.get("help_needed_what", "-"),
         "has_product_task": meta.get("has_product_task", "no"),
-        "code_repos": code_repos,
-        "env_summary": env_summary,
         "log_count": log_count,
         "latest_log_date": latest_log_date,
         "submitted_at": meta.get("submitted_at", ""),
@@ -367,12 +358,10 @@ def collect_student_record(full_name: str, spoke_dir: Path, week: str) -> Dict[s
         "has_report": has_rep,
         "has_evidence": has_ev,
         "has_judgment": has_jd,
-        "has_product_update": bool(prod_txt.strip()),
         "report_md": rep_txt,
         "evidence_md": ev_txt,
         "judgment_md": jd_txt,
-        "product_md": prod_txt,
-        "recent_logs_md": recent_logs_md,
+        "recent_progress_md": recent_progress_md,
         "project_cards": parse_project_cards(spoke_dir),
     }
 
@@ -428,7 +417,8 @@ def render_safe_markdown_html(md_text: str) -> str:
 def status_badge(status: str) -> Tuple[str, str]:
     mapping = {
         "submitted_human": ("已齐备·本人确认", "ok"),
-        "submitted_ai_mvp": ("已提交·AI生成MVP", "ok"),
+        "submitted_ai_mvp": ("已提交周报", "ok"),
+        "progress_only": ("已交今日进展（周报待交）", "warn"),
         "missing_judgment": ("缺本人判断页", "warn"),
         "missing_evidence": ("缺证据页", "warn"),
         "missing_all": ("尚未提交", "err"),
@@ -440,45 +430,32 @@ def build_team_digest_md(records: List[Dict[str, Any]], week: str) -> str:
     total = len(records)
     sub_human = sum(1 for r in records if r["status"] == "submitted_human")
     sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
-    missing = total - sub_human - sub_ai
+    prog_only = sum(1 for r in records if r["status"] == "progress_only")
+    missing = total - sub_human - sub_ai - prog_only
 
     lines = [
-        f"# Yao Research Group 周报汇总（{week}）",
+        f"# Yao Research Group 进展与周报汇总（{week}）",
         "",
         f"- **生成时间**：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %Z')}",
-        f"- **已登记**：{total} 人｜**已提交**：{sub_human + sub_ai} 人（本人确认 {sub_human} / AI生成MVP {sub_ai}）｜**缺失/未交**：{missing} 人",
+        f"- **已登记**：{total} 人｜**周报已交**：{sub_human + sub_ai} 人｜**仅今日进展**：{prog_only} 人｜**未交**：{missing} 人",
         "",
-        "## 1. 全员提交与环境状态总表",
+        "## 1. 全员提交状态总表",
         "",
-        "| 成员 | 主课题 | 状态 | 最近日志 | 会议请求 | 阻塞摘要 | 环境/工具 | 私有库 |",
-        "|---|---|---|---|---|---|---|---|",
+        "| 成员 | 主课题 | 状态 | 最近进展日期 | 会议请求 | 阻塞摘要 | 私有库 |",
+        "|---|---|---|---|---|---|---|",
     ]
     for r in records:
         label, _ = status_badge(r["status"])
         lines.append(
             f"| {r['student_name']} | {r['topic']} | {label} | {r['latest_log_date']} ({r['log_count']}) | "
-            f"`{r['meeting_request']}` | {r['blockers_summary']} | {r['env_summary']} | `{r['repo']}` |"
+            f"`{r['meeting_request']}` | {r['blockers_summary']} | `{r['repo']}` |"
         )
 
-    lines.extend(["", "## 2. 按课题与论文管线汇总", ""])
-    topics: Dict[str, List[Dict[str, Any]]] = {}
-    for r in records:
-        topics.setdefault(r["topic"], []).append(r)
-    for topic, group in topics.items():
-        members = "、".join(g["student_name"] for g in group)
-        lines.append(f"### 课题：{topic}（{members}）")
-        for g in group:
-            for c in g["project_cards"]:
-                lines.append(
-                    f"- **{g['student_name']} / {c['title']}**：阶段 `{c['stage']}`｜目标 `{c['venue']}`｜停止条件：{c['kill_criteria']}（更新：{c['updated_at']}）"
-                )
-        lines.append("")
-
-    lines.extend(["## 3. 本周周报正文速览", ""])
+    lines.extend(["", "## 2. 近期进展与周报正文速览", ""])
     for r in records:
         lines.append(f"### {r['student_name']}（{r['topic']}｜请求：`{r['meeting_request']}`）")
-        primary = r["report_md"].strip() or r["judgment_md"].strip() or r["evidence_md"].strip()
-        lines.append(primary or "*(未提交周报正文)*")
+        primary = r["report_md"].strip() or r["judgment_md"].strip() or r["recent_progress_md"].strip()
+        lines.append(primary or "*(暂无提交内容)*")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -494,7 +471,7 @@ def build_preread_input_md(records: List[Dict[str, Any]], week: str, advisor_pro
         "",
         "---",
         "",
-        f"## 全体成员本周周报材料（共 {len(records)} 人）",
+        f"## 全体成员科研进展与周报材料（共 {len(records)} 人）",
         "",
     ]
     for r in records:
@@ -502,23 +479,19 @@ def build_preread_input_md(records: List[Dict[str, Any]], week: str, advisor_pro
         lines.extend(
             [
                 f"### 成员：{r['student_name']} (`{r['repo']}`)",
-                f"- 状态：{label}｜身份：{r['role']}｜课题：{r['topic']}｜最近日志：{r['latest_log_date']}（共 {r['log_count']} 份）",
+                f"- 状态：{label}｜身份：{r['role']}｜课题：{r['topic']}｜最近进展：{r['latest_log_date']}（共 {r['log_count']} 份）",
                 f"- 会议请求：`{r['meeting_request']}`｜阻塞：{r['blockers_summary']}｜求助：{r['help_needed_from']} ({r['help_needed_what']})",
-                f"- 关联代码：{r['code_repos']}｜环境：{r['env_summary']}",
                 "",
             ]
         )
         if r["report_md"].strip():
             lines.extend(["#### 本周周报 (`report.md`)", r["report_md"].strip(), ""])
         if r["judgment_md"].strip():
-            lines.extend(["#### 本人判断页 (`judgment.md`)", r["judgment_md"].strip(), ""])
+            lines.extend(["#### 判断页 (`judgment.md`)", r["judgment_md"].strip(), ""])
         if r["evidence_md"].strip():
-            lines.extend(["#### AI 证据页 (`evidence.md`)", r["evidence_md"].strip(), ""])
-        if r["project_cards"]:
-            lines.append("#### 项目活页卡摘要")
-            for c in r["project_cards"]:
-                lines.append(f"- **{c['title']}** (阶段: {c['stage']} | 目标: {c['venue']} | 停止条件: {c['kill_criteria']})")
-            lines.append("")
+            lines.extend(["#### 证据页 (`evidence.md`)", r["evidence_md"].strip(), ""])
+        if r["recent_progress_md"].strip():
+            lines.extend(["#### 最近今日进展 (`progress/`)", r["recent_progress_md"].strip(), ""])
         lines.extend(["---", ""])
     return "\n".join(lines)
 
@@ -527,25 +500,25 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
     total = len(records)
     sub_human = sum(1 for r in records if r["status"] == "submitted_human")
     sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
-    missing = total - sub_human - sub_ai
+    prog_only = sum(1 for r in records if r["status"] == "progress_only")
+    missing = total - sub_human - sub_ai - prog_only
     gen_time = html.escape(datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z"))
     week_esc = html.escape(week)
 
     overview_cards: List[str] = []
     for r in records:
         label, cls = status_badge(r["status"])
-        primary_md = r["report_md"].strip() or r["judgment_md"].strip() or r["evidence_md"].strip()
+        primary_md = r["report_md"].strip() or r["judgment_md"].strip() or r["recent_progress_md"].strip()
         body_html = render_safe_markdown_html(primary_md) if primary_md else "<p class='muted'>（本周尚未提交内容）</p>"
         overview_cards.append(
             f"<article class='card'>"
             f"<div class='card-head'>"
             f"<div><strong>{html.escape(r['student_name'])}</strong> <span class='tag'>{html.escape(r['topic'])}</span> "
-            f"<span class='tag'>日志:{r['log_count']} ({html.escape(r['latest_log_date'])})</span></div>"
+            f"<span class='tag'>进展:{r['log_count']} ({html.escape(r['latest_log_date'])})</span></div>"
             f"<div><span class='badge {cls}'>{html.escape(label)}</span> "
             f"<span class='tag'>请求: {html.escape(r['meeting_request'])}</span></div>"
             f"</div>"
-            f"<div class='meta-line'><strong>阻塞：</strong>{html.escape(r['blockers_summary'])} ｜ "
-            f"<strong>代码：</strong><code>{html.escape(r['code_repos'])}</code></div>"
+            f"<div class='meta-line'><strong>阻塞：</strong>{html.escape(r['blockers_summary'])}</div>"
             f"<div class='card-body'>{body_html}</div>"
             f"</article>"
         )
@@ -553,23 +526,10 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
     topics: Dict[str, List[Dict[str, Any]]] = {}
     for r in records:
         topics.setdefault(r["topic"], []).append(r)
-    pipeline_rows: List[str] = []
     topic_blocks: List[str] = []
     for topic, grp in topics.items():
         names = ", ".join(html.escape(g["student_name"]) for g in grp)
         topic_blocks.append(f"<div class='card'><h3>{html.escape(topic)}</h3><p>参与成员：{names}</p></div>")
-        for g in grp:
-            for c in g["project_cards"]:
-                pipeline_rows.append(
-                    "<tr>"
-                    f"<td>{html.escape(g['student_name'])}</td>"
-                    f"<td>{html.escape(c['title'])}</td>"
-                    f"<td>{html.escape(c['stage'])}</td>"
-                    f"<td>{html.escape(c['venue'])}</td>"
-                    f"<td>{html.escape(c['kill_criteria'])}</td>"
-                    f"<td>{html.escape(c['updated_at'])}</td>"
-                    "</tr>"
-                )
 
     archive_blocks: List[str] = []
     for r in records:
@@ -581,20 +541,13 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
             parts.append(f"<h4>判断页 (judgment.md)</h4><div class='card-body'>{render_safe_markdown_html(r['judgment_md'])}</div>")
         if r["evidence_md"].strip():
             parts.append(f"<details><summary>展开证据页 (evidence.md)</summary><div class='details-box'>{render_safe_markdown_html(r['evidence_md'])}</div></details>")
-        if r["recent_logs_md"].strip():
-            parts.append(f"<details><summary>展开最近日常日志 ({r['log_count']} 份)</summary><div class='details-box'>{render_safe_markdown_html(r['recent_logs_md'])}</div></details>")
-        if r["has_product_update"]:
-            parts.append(f"<details><summary>产品进展 (product.md)</summary><div class='details-box'>{render_safe_markdown_html(r['product_md'])}</div></details>")
-        for c in r["project_cards"]:
-            parts.append(
-                f"<details><summary>项目活页卡：{html.escape(c['title'])} ({html.escape(c['stage'])})</summary>"
-                f"<div class='details-box'>{render_safe_markdown_html(c['raw'])}</div></details>"
-            )
+        if r["recent_progress_md"].strip():
+            parts.append(f"<details open><summary>今日进展记录 ({r['log_count']} 份)</summary><div class='details-box'>{render_safe_markdown_html(r['recent_progress_md'])}</div></details>")
         archive_blocks.append(
             f"<article class='card'>"
             f"<div class='card-head'><div><strong>{html.escape(r['student_name'])}</strong> · <code>{html.escape(r['repo'])}</code></div>"
             f"<div><span class='badge {cls}'>{html.escape(label)}</span></div></div>"
-            f"<p class='meta-line'>环境：{html.escape(r['env_summary'])} ｜ 提交时间：{html.escape(r['submitted_at'] or '-')}</p>"
+            f"<p class='meta-line'>提交时间：{html.escape(r['submitted_at'] or '-')}</p>"
             f"{''.join(parts) or '<p class=muted>暂无记录</p>'}"
             f"</article>"
         )
@@ -619,7 +572,7 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Yao Research Group 周报汇总 · {week_esc}</title>
+<title>Yao Research Group 进展与周报汇总 · {week_esc}</title>
 <style>
   :root {{ --bg:#f8fafc; --card:#ffffff; --text:#0f172a; --muted:#64748b; --border:#e2e8f0; --accent:#2563eb; }}
   * {{ box-sizing:border-box; }}
@@ -659,14 +612,14 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
 <body>
 <div class="wrap">
   <header>
-    <h1>Yao Research Group 科研周报汇报 · {week_esc}</h1>
-    <div class="stats">生成时间：{gen_time} ｜ 已登记：{total} 人 ｜ 已提交：{sub_human + sub_ai} 人（本人确认 {sub_human} / AI生成MVP {sub_ai}）｜ 缺失：{missing} 人</div>
+    <h1>Yao Research Group 科研进展汇总 · {week_esc}</h1>
+    <div class="stats">生成时间：{gen_time} ｜ 已登记：{total} 人 ｜ 周报已交：{sub_human + sub_ai} 人 ｜ 仅今日进展：{prog_only} 人 ｜ 未交：{missing} 人</div>
   </header>
 
   <div class="tabs">
-    <button class="tab-btn active" onclick="showTab('tab-judgments', this)">1. 本周周报速览</button>
-    <button class="tab-btn" onclick="showTab('tab-topics', this)">2. 按课题与论文管线</button>
-    <button class="tab-btn" onclick="showTab('tab-archives', this)">3. 逐人完整档案（含日常日志）</button>
+    <button class="tab-btn active" onclick="showTab('tab-judgments', this)">1. 本周进展速览</button>
+    <button class="tab-btn" onclick="showTab('tab-topics', this)">2. 按课题分布</button>
+    <button class="tab-btn" onclick="showTab('tab-archives', this)">3. 逐人详细记录</button>
     <button class="tab-btn" onclick="showTab('tab-status', this)">4. 提交状态与催收表</button>
   </div>
 
@@ -675,12 +628,6 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
   </section>
 
   <section id="tab-topics" class="panel">
-    <h2>论文管线与停止条件看板</h2>
-    <table>
-      <thead><tr><th>成员</th><th>项目卡</th><th>阶段</th><th>目标会议/节点</th><th>停止条件</th><th>更新</th></tr></thead>
-      <tbody>{''.join(pipeline_rows) or "<tr><td colspan='6' class='muted'>暂无项目活页卡</td></tr>"}</tbody>
-    </table>
-    <h2>按课题分布</h2>
     {''.join(topic_blocks)}
   </section>
 
@@ -690,7 +637,7 @@ def build_advisor_html(records: List[Dict[str, Any]], week: str) -> str:
 
   <section id="tab-status" class="panel">
     <table>
-      <thead><tr><th>成员</th><th>主课题</th><th>状态</th><th>最近日志</th><th>会议请求</th><th>提交时间</th><th>仓库</th></tr></thead>
+      <thead><tr><th>成员</th><th>主课题</th><th>状态</th><th>最近进展</th><th>会议请求</th><th>提交时间</th><th>仓库</th></tr></thead>
       <tbody>{''.join(status_rows)}</tbody>
     </table>
   </section>
@@ -735,8 +682,6 @@ def generate_digests(
                     "help_needed_from": "-",
                     "help_needed_what": "-",
                     "has_product_task": "no",
-                    "code_repos": "-",
-                    "env_summary": "-",
                     "log_count": 0,
                     "latest_log_date": "-",
                     "submitted_at": "",
@@ -744,12 +689,10 @@ def generate_digests(
                     "has_report": False,
                     "has_evidence": False,
                     "has_judgment": False,
-                    "has_product_update": False,
                     "report_md": "",
                     "evidence_md": "",
                     "judgment_md": "",
-                    "product_md": "",
-                    "recent_logs_md": "",
+                    "recent_progress_md": "",
                     "project_cards": [],
                 }
             )
@@ -761,6 +704,7 @@ def generate_digests(
 
     sub_human = sum(1 for r in records if r["status"] == "submitted_human")
     sub_ai = sum(1 for r in records if r["status"] == "submitted_ai_mvp")
+    prog_only = sum(1 for r in records if r["status"] == "progress_only")
     status_payload = {
         "week": week,
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -769,6 +713,7 @@ def generate_digests(
             "submitted_total": sub_human + sub_ai,
             "submitted_human": sub_human,
             "submitted_ai_mvp": sub_ai,
+            "progress_only": prog_only,
             "missing_judgment": sum(1 for r in records if r["status"] == "missing_judgment"),
             "missing_evidence": sum(1 for r in records if r["status"] == "missing_evidence"),
             "missing_all": sum(1 for r in records if r["status"] == "missing_all"),
@@ -777,7 +722,7 @@ def generate_digests(
             {
                 k: v
                 for k, v in r.items()
-                if k not in {"report_md", "evidence_md", "judgment_md", "product_md", "recent_logs_md", "project_cards"}
+                if k not in {"report_md", "evidence_md", "judgment_md", "recent_progress_md", "project_cards"}
             }
             for r in records
         ],
@@ -795,35 +740,10 @@ def generate_digests(
     return out_dir
 
 
-def push_review(ws: Path, repo_full_name: str, week: str, file_path: Path, kind: str, skip_remote: bool) -> None:
-    if not file_path.is_file():
-        raise FileNotFoundError(f"找不到反馈文件：{file_path}")
-    sdir = spoke_dir_for(ws, repo_full_name)
-    if not sdir.is_dir():
-        raise RuntimeError(f"本地未找到已同步的仓库目录：{sdir}，请先执行 --sync")
-    if not skip_remote:
-        meta = json.loads(run_cmd(["gh", "api", f"repos/{repo_full_name}"]).stdout)
-        if not meta.get("private", False):
-            raise RuntimeError(f"安全拦截：拒绝向非私有仓库 {repo_full_name} 写入批示！")
-
-    dest = sdir / "reviews" / f"{week}-{kind}.md"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(file_path.read_text(encoding="utf-8"), encoding="utf-8")
-    run_cmd(["git", "add", str(dest.relative_to(sdir))], cwd=sdir)
-    if run_cmd(["git", "status", "--porcelain"], cwd=sdir).stdout.strip():
-        run_cmd(["git", "commit", "-m", f"review({week}): add {kind}"], cwd=sdir)
-        if not skip_remote:
-            branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=sdir).stdout.strip() or "main"
-            run_cmd(["git", "push", "origin", branch], cwd=sdir)
-        print(f"[ok] 已写入并提交批示：{dest}")
-    else:
-        print(f"[ok] 批示内容无变化：{dest}")
-
-
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="秘书与导师汇总端：自动收邀、拉取私有库、生成多视图周报与HTML")
+    parser = argparse.ArgumentParser(description="秘书与导师汇总端：自动收邀、拉取私有库、生成汇总与HTML")
     parser.add_argument("--workspace", default="~/.yao-research-secretary", help="秘书私有聚合工作区（0700）")
-    parser.add_argument("--accept-invites", action="store_true", help="自动接收 GitHub 上 yao-research-* 私有库邀请")
+    parser.add_argument("--accept-invites", action="store_true", help="自动接收 GitHub 上 yao-research-* 私有库只读邀请")
     parser.add_argument("--add-repo", action="append", default=[], help="手动登记仓库（owner/repo 或 owner/repo=本地路径）")
     parser.add_argument("--sync", action="store_true", help="批量 clone/pull 已登记的私有仓库")
     parser.add_argument("--digest", action="store_true", help="生成 status.json / team-digest.md / preread / HTML")
@@ -831,11 +751,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--hub-dir", default=None, help="本地协议中心目录")
     parser.add_argument("--hub-repo", default=DEFAULT_HUB_REPO, help="公共协议中心仓库")
     parser.add_argument("--hub-branch", default=DEFAULT_HUB_BRANCH, help="公共协议中心分支")
-    parser.add_argument("--push-review", action="store_true", help="回写导师批示或 AI 预读反馈到学生私有库")
-    parser.add_argument("--repo", default=None, help="回写目标仓库 owner/repo")
-    parser.add_argument("--file", default=None, help="待回写的 Markdown 文件路径")
-    parser.add_argument("--kind", default="advisor", choices=["ai-review", "advisor"], help="批示类型")
-    parser.add_argument("--skip-remote", action="store_true", help="离线模式（跳过 GitHub API 与远端 pull/push）")
+    parser.add_argument("--skip-remote", action="store_true", help="离线模式（跳过 GitHub API 与远端 pull）")
     return parser.parse_args(argv)
 
 
@@ -853,12 +769,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         sync_spokes(ws, args.skip_remote)
     if args.digest:
         generate_digests(ws, args.week, hub_dir, args.hub_repo, args.hub_branch, args.skip_remote)
-    if args.push_review:
-        if not args.repo or not args.file:
-            raise ValueError("--push-review 需要同时提供 --repo 和 --file")
-        push_review(ws, args.repo, args.week, Path(args.file).expanduser().resolve(), args.kind, args.skip_remote)
 
-    if not any([args.accept_invites, args.add_repo, args.sync, args.digest, args.push_review]):
+    if not any([args.accept_invites, args.add_repo, args.sync, args.digest]):
         print(f"[info] 工作区就绪：{ws}（使用 --help 查看全部子命令）")
     return 0
 

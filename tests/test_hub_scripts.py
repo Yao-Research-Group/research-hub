@@ -1,8 +1,8 @@
-"""Offline unit tests for Yao Research Hub v1.1 (yao_sync.py + secretary_collect.py + legacy compat)."""
+"""Offline unit tests for Yao Research Hub v2.0 (privacy-first manual progress sync)."""
 from __future__ import annotations
 
-import io
 from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -21,318 +21,276 @@ import secretary_collect  # noqa: E402
 import yao_sync  # noqa: E402
 
 
-class HubV11Tests(unittest.TestCase):
+class HubV20PrivacyTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="yao-hub-v11-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="yao-hub-v20-"))
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_zero_prompt_init_env_detection_and_idempotent_rules(self) -> None:
+    def test_init_requires_project_dir_and_never_touches_any_agent_rules_or_telemetry(self) -> None:
         fake_home = self.tmp / "home"
         (fake_home / ".claude").mkdir(parents=True)
         (fake_home / ".codex").mkdir(parents=True)
-        (fake_home / ".cursor").mkdir(parents=True)
         claude_md = fake_home / ".claude" / "CLAUDE.md"
-        claude_md.write_text("# User existing Claude rules\n", encoding="utf-8")
+        claude_md.write_text("# Original Global Rules\n", encoding="utf-8")
 
-        repo_dir = self.tmp / "student_repo"
-        proj_dir = self.tmp / "proj"
+        proj_dir = self.tmp / "research_proj"
         proj_dir.mkdir(parents=True)
+        repo_dir = self.tmp / "repo"
+        policy_file = self.tmp / "local-policy.json"
 
         prev_home = os.environ.get("HOME")
         os.environ["HOME"] = str(fake_home)
         try:
-            # 0) Calling init without --project-dir / --global / --no-agent-md MUST fail (rc=2) and touch nothing
-            rc_missing_scope = yao_sync.main(
+            # 1) Missing --project-dir MUST fail (rc=2)
+            rc_no_proj = yao_sync.main(
                 [
                     "init",
                     "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
+                    "--policy-file", str(policy_file),
                     "--skip-remote",
                 ]
             )
-            self.assertEqual(rc_missing_scope, 2)
-            self.assertEqual(claude_md.read_text(encoding="utf-8"), "# User existing Claude rules\n")
-            self.assertFalse((fake_home / ".codex" / "AGENTS.md").exists())
+            self.assertEqual(rc_no_proj, 2)
 
-            # 1) Explicit --global init
-            rc = yao_sync.main(
-                [
-                    "init",
-                    "--global",
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--now", "2026-11-24T13:00:00+08:00",
-                ]
-            )
-            self.assertEqual(rc, 0)
-            self.assertTrue((repo_dir / ".yao-notebook.json").is_file())
-            self.assertTrue((repo_dir / "logs").is_dir())
-            self.assertTrue((repo_dir / "projects").is_dir())
-            self.assertTrue((repo_dir / "weekly").is_dir())
-
-            nb = json.loads((repo_dir / ".yao-notebook.json").read_text(encoding="utf-8"))
-            self.assertEqual(nb["schema_version"], 2)
-            self.assertIn("claude", nb["env"]["ai_tools"])
-            self.assertIn("codex", nb["env"]["ai_tools"])
-
-            c_txt = claude_md.read_text(encoding="utf-8")
-            self.assertIn("# User existing Claude rules", c_txt)
-            self.assertIn(yao_sync.BEGIN_MARKER, c_txt)
-            self.assertIn("适用范围", c_txt)
-            self.assertTrue((fake_home / ".codex" / "AGENTS.md").is_file())
-            self.assertTrue((fake_home / ".cursor" / "rules" / "yao-research-hub.mdc").is_file())
-
-            # Re-init with --global is idempotent (exactly 1 marker block)
-            rc2 = yao_sync.main(
-                [
-                    "init",
-                    "--global",
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--now", "2026-11-24T13:00:00+08:00",
-                ]
-            )
-            self.assertEqual(rc2, 0)
-            self.assertEqual(claude_md.read_text(encoding="utf-8").count(yao_sync.BEGIN_MARKER), 1)
-
-            # 2) Project-dir init injects ONLY into project AGENTS.md & CLAUDE.md
-            rc3 = yao_sync.main(
+            # 2) Valid --project-dir succeeds, installs hook + local-policy.json, NEVER touches AGENTS/CLAUDE/global
+            rc_ok = yao_sync.main(
                 [
                     "init",
                     "--project-dir", str(proj_dir),
                     "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
+                    "--policy-file", str(policy_file),
                     "--skip-remote",
                 ]
             )
-            self.assertEqual(rc3, 0)
-            self.assertTrue((proj_dir / "AGENTS.md").is_file())
-            self.assertTrue((proj_dir / "CLAUDE.md").is_file())
+            self.assertEqual(rc_ok, 0)
+            self.assertEqual(claude_md.read_text(encoding="utf-8"), "# Original Global Rules\n")
+            self.assertFalse((fake_home / ".codex" / "AGENTS.md").exists())
+            self.assertFalse((proj_dir / "AGENTS.md").exists())
+            self.assertFalse((proj_dir / "CLAUDE.md").exists())
+            self.assertFalse((repo_dir / ".yao-notebook.json").exists())
 
-            # 3) Non-existent --project-dir fails cleanly (rc=2) without creating directory
-            rc_bad_proj = yao_sync.main(
-                [
-                    "init",
-                    "--project-dir", str(self.tmp / "nonexistent_dir"),
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                ]
-            )
-            self.assertEqual(rc_bad_proj, 2)
-            self.assertFalse((self.tmp / "nonexistent_dir").exists())
+            self.assertTrue(policy_file.is_file())
+            pol = json.loads(policy_file.read_text(encoding="utf-8"))
+            self.assertEqual(pol["allowed_project_dirs"], [str(proj_dir.resolve())])
+            self.assertTrue((repo_dir / ".git" / "hooks" / "pre-commit").is_file())
+            self.assertTrue(os.access(repo_dir / ".git" / "hooks" / "pre-commit", os.X_OK))
+
+            # Verify zero host/email/path telemetry inside repo files
+            profile_txt = (repo_dir / "profile.md").read_text(encoding="utf-8")
+            self.assertNotIn(str(proj_dir), profile_txt)
+            self.assertNotIn("@", profile_txt)
         finally:
             if prev_home is None:
                 os.environ.pop("HOME", None)
             else:
                 os.environ["HOME"] = prev_home
 
-    def test_dynamic_schedule_preflight_and_push_gates_and_offline_queue(self) -> None:
+    def test_cwd_allowlist_preview_confirm_gate_and_precommit_hook(self) -> None:
+        proj_dir = self.tmp / "allowed_proj"
+        other_dir = self.tmp / "other_unrelated"
+        proj_dir.mkdir(parents=True)
+        other_dir.mkdir(parents=True)
         repo_dir = self.tmp / "repo"
+        policy_file = self.tmp / "local-policy.json"
+
         yao_sync.main(
             [
                 "init",
-                "--no-agent-md",
+                "--project-dir", str(proj_dir),
                 "--repo-dir", str(repo_dir),
                 "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(policy_file),
                 "--skip-remote",
             ]
         )
+        # Initial commit of clean skeleton
+        rc_init_push = yao_sync.main(
+            [
+                "push",
+                "--confirm",
+                "--from-dir", str(proj_dir),
+                "--repo-dir", str(repo_dir),
+                "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(policy_file),
+                "--skip-remote",
+            ]
+        )
+        self.assertEqual(rc_init_push, 0)
 
-        # In bootstrap_week window (2026-11-24 13:00) without report -> WEEKLY_REPORT_DUE
+        # 1) Non-allowlisted directory MUST fail (rc=5)
+        rc_bad_cwd = yao_sync.main(
+            [
+                "preview",
+                "--from-dir", str(other_dir),
+                "--repo-dir", str(repo_dir),
+                "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(policy_file),
+            ]
+        )
+        self.assertEqual(rc_bad_cwd, 5)
+
+        # 2) Valid progress file passes preview and prints plaintext, blocks push without --confirm (rc=6), passes with --confirm
+        prog = repo_dir / "progress" / "2026-11-24.md"
+        prog.write_text("# 今日进展\n- 完成对比实验基线评测。\n- 失败：43步蒸馏未收敛。\n", encoding="utf-8")
+
         buf = io.StringIO()
         with redirect_stdout(buf):
-            yao_sync.main(
+            rc_prev = yao_sync.main(
                 [
-                    "preflight",
+                    "preview",
+                    "--from-dir", str(proj_dir),
                     "--repo-dir", str(repo_dir),
                     "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--json",
-                    "--now", "2026-11-24T13:00:00+08:00",
+                    "--policy-file", str(policy_file),
                 ]
             )
-        pf1 = json.loads(buf.getvalue())
-        self.assertEqual(pf1["action"], "WEEKLY_REPORT_DUE")
-        self.assertEqual(pf1["active_week"], "2026-W48")
-        self.assertFalse(pf1["require_human_judgment"])
+        self.assertEqual(rc_prev, 0)
+        self.assertIn("完成对比实验基线评测", buf.getvalue())
 
-        # Outside window (2026-11-26 10:00, Thursday morning) -> NONE
-        buf2 = io.StringIO()
-        with redirect_stdout(buf2):
-            yao_sync.main(
-                [
-                    "preflight",
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--json",
-                    "--now", "2026-11-26T10:00:00+08:00",
-                ]
-            )
-        pf2 = json.loads(buf2.getvalue())
-        self.assertEqual(pf2["action"], "NONE")
-
-        # Regular Monday window (2026-11-30 12:00 is Monday before 18:00 deadline, week 2026-W49)
-        buf3 = io.StringIO()
-        with redirect_stdout(buf3):
-            yao_sync.main(
-                [
-                    "preflight",
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--json",
-                    "--now", "2026-11-30T12:00:00+08:00",
-                ]
-            )
-        pf3 = json.loads(buf3.getvalue())
-        self.assertEqual(pf3["action"], "WEEKLY_REPORT_DUE")
-        self.assertEqual(pf3["active_week"], "2026-W49")
-
-        # Push bad weekly report (missing 失败) should BLOCK (exit 4)
-        w48 = repo_dir / "weekly" / "2026-W48"
-        w48.mkdir(parents=True, exist_ok=True)
-        (w48 / "report.md").write_text("# 本周周报\n\n本周工作顺利推进，效果很好，完成若干模块重构与代码优化任务。" * 3, encoding="utf-8")
-        rc_bad = yao_sync.main(
+        rc_no_confirm = yao_sync.main(
             [
                 "push",
+                "--from-dir", str(proj_dir),
                 "--repo-dir", str(repo_dir),
                 "--hub-dir", str(HUB_DIR),
-                "--mode", "weekly",
-                "--week", "2026-W48",
+                "--policy-file", str(policy_file),
                 "--skip-remote",
             ]
         )
-        self.assertEqual(rc_bad, 4)
+        self.assertEqual(rc_no_confirm, 6)
 
-        # Push good v1.1 AI MVP report.md should PASS and auto-create meta.yaml + commit
-        shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / "report.md", w48 / "report.md")
-        rc_good = yao_sync.main(
+        rc_confirm = yao_sync.main(
             [
                 "push",
+                "--confirm",
+                "--from-dir", str(proj_dir),
                 "--repo-dir", str(repo_dir),
                 "--hub-dir", str(HUB_DIR),
-                "--mode", "weekly",
-                "--week", "2026-W48",
+                "--policy-file", str(policy_file),
                 "--skip-remote",
             ]
         )
-        self.assertEqual(rc_good, 0)
-        self.assertTrue((w48 / "meta.yaml").is_file())
+        self.assertEqual(rc_confirm, 0)
 
-        # Re-run preflight inside 2026-W48 window -> now action is NONE and git status stays clean!
-        buf4 = io.StringIO()
-        with redirect_stdout(buf4):
-            yao_sync.main(
-                [
-                    "preflight",
-                    "--repo-dir", str(repo_dir),
-                    "--hub-dir", str(HUB_DIR),
-                    "--skip-remote",
-                    "--json",
-                    "--now", "2026-11-24T13:00:00+08:00",
-                ]
+        # 3) Test native .git/hooks/pre-commit directly via raw `git commit` against 6 violation types
+        bad_cases = [
+            ("src/leak.py", "print('source code')\n"),
+            ("progress/2026-11-25.md", "查看 /Users/alice/OneDrive/secret.txt\n"),
+            ("progress/2026-11-25.md", "目录在 ~/Desktop/private 下面\n"),
+            ("progress/2026-11-25.md", "token=" + "ghp_" + "A" * 28 + "\n"),
+            ("progress/2026-11-25.md", "联系邮箱 alice@example.com 或 13812345678\n"),
+            ("progress/2026-11-25.md", "a" * 70000 + "\n"),
+        ]
+        for rel, content in bad_cases:
+            p = repo_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo_dir), "add", "-f", rel], check=True)
+            res = subprocess.run(
+                ["git", "-C", str(repo_dir), "commit", "-m", "should fail"],
+                text=True, capture_output=True,
             )
-        pf4 = json.loads(buf4.getvalue())
-        self.assertEqual(pf4["action"], "NONE")
-        self.assertEqual(pf4["submission_state"], "submitted_ai_mvp")
-        st_after_preflight = subprocess.run(
-            ["git", "-C", str(repo_dir), "status", "--porcelain"],
-            text=True, capture_output=True, check=True,
-        ).stdout.strip()
-        self.assertEqual(st_after_preflight, "")
+            self.assertNotEqual(res.returncode, 0, f"pre-commit hook failed to block {rel}: {content[:40]}")
+            subprocess.run(["git", "-C", str(repo_dir), "reset", "HEAD", "--", rel], check=True, capture_output=True)
+            p.unlink(missing_ok=True)
+        shutil.rmtree(repo_dir / "src", ignore_errors=True)
 
-        # Secret scan gate blocks leaked token
-        fake_tok = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
-        (repo_dir / "logs" / "2026-11-24.md").write_text(f"token: {fake_tok}\n", encoding="utf-8")
-        rc_sec = yao_sync.main(
+        # 4) Legacy untouched files (e.g. old daily/) do NOT block committing valid new progress/
+        legacy_f = repo_dir / "daily" / "old.md"
+        legacy_f.parent.mkdir(parents=True, exist_ok=True)
+        legacy_f.write_text("legacy note\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo_dir), "add", "daily/old.md"], check=True)
+        subprocess.run(["git", "-C", str(repo_dir), "commit", "--no-verify", "-m", "legacy"], check=True, capture_output=True)
+
+        (repo_dir / "progress" / "2026-11-26.md").write_text("# 今日进展\n- 推进消融实验。\n", encoding="utf-8")
+        rc_after_legacy = yao_sync.main(
             [
                 "push",
+                "--confirm",
+                "--from-dir", str(proj_dir),
                 "--repo-dir", str(repo_dir),
                 "--hub-dir", str(HUB_DIR),
-                "--mode", "daily",
+                "--policy-file", str(policy_file),
                 "--skip-remote",
             ]
         )
-        self.assertEqual(rc_sec, 3)
-        (repo_dir / "logs" / "2026-11-24.md").write_text("# 2026-11-24\n- 完成测试验证。\n", encoding="utf-8")
+        self.assertEqual(rc_after_legacy, 0)
 
-        # Offline resilience: broken local remote still commits cleanly and returns 0
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "remote", "add", "origin", str(self.tmp / "nonexistent-remote.git")],
-            check=True,
-        )
-        rc_offline = yao_sync.main(
-            [
-                "push",
-                "--repo-dir", str(repo_dir),
-                "--hub-dir", str(HUB_DIR),
-                "--mode", "daily",
-            ]
-        )
-        self.assertEqual(rc_offline, 0)
-
-    def test_secretary_collect_hybrid_v10_and_v11_and_xss_escape(self) -> None:
-        # Student 1: v1.1 AI MVP report.md without manual Chinese name, plus XSS probe
+    def test_secretary_collect_v2_progress_and_weekly_xss_escape(self) -> None:
+        # Student 1: only progress/2026-11-24.md (plus XSS probe)
         s1 = self.tmp / "s1"
+        p1 = self.tmp / "p1"
+        p1.mkdir(parents=True)
+        pol1 = self.tmp / "pol1.json"
         yao_sync.main(
             [
                 "init",
-                "--no-agent-md",
+                "--project-dir", str(p1),
                 "--repo-dir", str(s1),
                 "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(pol1),
                 "--skip-remote",
             ]
         )
-        (s1 / "logs" / "2026-11-24.md").write_text("- [12:00 | proj | main] 完成基准评测。\n", encoding="utf-8")
-        w1 = s1 / "weekly" / "2026-W48"
-        w1.mkdir(parents=True, exist_ok=True)
-        rep_txt = (HUB_DIR / "examples" / "good-weekly-example" / "report.md").read_text(encoding="utf-8")
-        (w1 / "report.md").write_text(rep_txt + "\n<script>alert('xss')</script>\n", encoding="utf-8")
-        yao_sync.main(
+        (s1 / "progress" / "2026-11-24.md").write_text(
+            "# 今日进展\n- 完成测试基线。\n<script>alert('xss')</script>\n", encoding="utf-8"
+        )
+        rc_p1 = yao_sync.main(
             [
                 "push",
+                "--confirm",
+                "--from-dir", str(p1),
                 "--repo-dir", str(s1),
                 "--hub-dir", str(HUB_DIR),
-                "--mode", "weekly",
-                "--week", "2026-W48",
+                "--policy-file", str(pol1),
                 "--skip-remote",
             ]
         )
+        self.assertEqual(rc_p1, 0)
 
-        # Student 2: v1.0 legacy human-verified evidence.md + judgment.md
+        # Student 2: v2.0 weekly report.md
         s2 = self.tmp / "s2"
+        p2 = self.tmp / "p2"
+        p2.mkdir(parents=True)
+        pol2 = self.tmp / "pol2.json"
         yao_sync.main(
             [
                 "init",
-                "--no-agent-md",
+                "--project-dir", str(p2),
                 "--repo-dir", str(s2),
                 "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(pol2),
                 "--skip-remote",
             ]
         )
         w2 = s2 / "weekly" / "2026-W48"
         w2.mkdir(parents=True, exist_ok=True)
-        for fname in ("evidence.md", "judgment.md", "meta.yaml"):
-            shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / fname, w2 / fname)
-        (w2 / "meta.yaml").write_text(
-            (w2 / "meta.yaml").read_text(encoding="utf-8").replace("2026-W47", "2026-W48").replace("张明（示例）", "学生乙"),
-            encoding="utf-8",
+        shutil.copy2(HUB_DIR / "examples" / "good-weekly-example" / "report.md", w2 / "report.md")
+        rc_p2 = yao_sync.main(
+            [
+                "push",
+                "--confirm",
+                "--from-dir", str(p2),
+                "--repo-dir", str(s2),
+                "--hub-dir", str(HUB_DIR),
+                "--policy-file", str(pol2),
+                "--mode", "weekly",
+                "--week", "2026-W48",
+                "--skip-remote",
+            ]
         )
-        subprocess.run(["git", "-C", str(s2), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(s2), "commit", "-m", "init s2"], check=True, capture_output=True)
+        self.assertEqual(rc_p2, 0)
 
         ws = self.tmp / "sec_ws"
         rc = secretary_collect.main(
             [
                 "--workspace", str(ws),
                 "--add-repo", f"alice/yao-research-memory={s1}",
-                "--add-repo", f"bob/yao-research-bob={s2}",
+                "--add-repo", f"bob/yao-research-memory={s2}",
                 "--sync",
                 "--digest",
                 "--week", "2026-W48",
@@ -343,18 +301,16 @@ class HubV11Tests(unittest.TestCase):
         self.assertEqual(rc, 0)
 
         out = ws / "digests" / "2026-W48"
-        status = json.loads((out / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual(status["summary"]["total"], 2)
-        self.assertEqual(status["summary"]["submitted_total"], 2)
-        self.assertEqual(status["summary"]["submitted_ai_mvp"], 1)
-        self.assertEqual(status["summary"]["submitted_human"], 1)
+        st = json.loads((out / "status.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["summary"]["total"], 2)
+        self.assertEqual(st["summary"]["progress_only"], 1)
+        self.assertEqual(st["summary"]["submitted_ai_mvp"], 1)
 
         html_text = (out / "advisor-report.html").read_text(encoding="utf-8")
         self.assertNotIn("<script>alert('xss')</script>", html_text)
         self.assertIn("&lt;script&gt;alert", html_text)
-        self.assertIn("学生乙", html_text)
-        self.assertIn("已提交·AI生成MVP", html_text)
-        self.assertIn("已齐备·本人确认", html_text)
+        self.assertIn("已交今日进展（周报待交）", html_text)
+        self.assertIn("已提交周报", html_text)
 
 
 if __name__ == "__main__":

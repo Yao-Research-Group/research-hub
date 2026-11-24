@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.1",
+  "schema_version": "2.0.0",
   "timezone": "Asia/Shanghai",
   "utc_offset_hours": 8,
   "trial_weeks": 4,
@@ -9,9 +9,9 @@
     "window_start": "2026-11-24T00:00:00+08:00",
     "deadline": "2026-11-24T16:00:00+08:00",
     "grace_end": "2026-11-25T23:59:59+08:00",
-    "auto_push_on_install": true,
+    "remind_only": true,
     "require_human_judgment": false,
-    "notes": "首日上线窗口：安装完成后由 AI 直接基于当前工作区与提交客观生成本周 report.md 并推送；不强制人工手写判断页。"
+    "notes": "仅做窗口提醒与引导 preview -> 人工确认 -> push --confirm，绝不未经确认自动推送。"
   },
   "regular_weekly": {
     "enabled": true,
@@ -20,9 +20,9 @@
     "deadline_minute": 0,
     "window_hours_before": 48,
     "grace_hours_after": 24,
-    "auto_push_on_window": true,
+    "remind_only": true,
     "require_human_judgment": false,
-    "description": "常规周报窗口：每周一 19:00 截止，提前 48 小时开放（周六 19:00 至周二 19:00）。"
+    "description": "常规周报窗口：每周一 19:00 截止，提前 48 小时开放提醒（周六 19:00 至周二 19:00），须用户确认明文预览后推送。"
   },
   "product_weekly": {
     "enabled": true,
@@ -37,7 +37,7 @@
       "time": "19:00",
       "event": "weekly_report_due",
       "owner": "all_students",
-      "description": "AI 自动在对话收尾汇总本周 logs/ 与代码提交，生成 weekly/<YYYY-Www>/report.md 并同步。"
+      "description": "将本周 progress/ 摘要归纳为 weekly/<YYYY-Www>/report.md，经本人确认明文预览后推送。"
     },
     {
       "day": "Tuesday",

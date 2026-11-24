@@ -1,6 +1,6 @@
 {
-  "schema_version": "1.1.1",
-  "notebook_schema_version": 2,
+  "schema_version": "2.0.0",
+  "notebook_schema_version": 3,
   "updated_at": "2026-11-24",
   "hub_repo": "Yao-Research-Group/research-hub",
   "hub_branch": "main",
@@ -10,26 +10,32 @@
     {
       "github": "taoyao2005",
       "role": "advisor",
-      "permission": "push"
+      "permission": "pull"
     },
     {
       "github": "treerobin06",
       "role": "secretary",
-      "permission": "push"
+      "permission": "pull"
     }
   ],
   "current_week": "2026-W48",
   "limits": {
-    "max_single_file_bytes": 2097152,
+    "max_single_file_bytes": 65536,
     "max_report_chars": 6000,
-    "max_evidence_chars": 6000,
-    "max_judgment_chars": 800,
-    "min_report_chars": 80,
-    "max_project_card_lines": 80
+    "min_report_chars": 60
   },
+  "allowed_repo_paths": [
+    "README.md",
+    ".gitignore",
+    "profile.md",
+    "progress/YYYY-MM-DD.md",
+    "weekly/YYYY-Www/meta.yaml",
+    "weekly/YYYY-Www/report.md"
+  ],
   "files": {
     "current": "protocol/CURRENT.md",
     "schedule": "protocol/schedule.json",
+    "privacy": "docs/PRIVACY.md",
     "prompts": {
       "advisor_preread": "protocol/prompts/advisor-preread.md",
       "student_evidence": "protocol/prompts/student-evidence.md",
@@ -37,28 +43,21 @@
     },
     "templates": {
       "profile": "protocol/templates/profile.md",
-      "project_card": "protocol/templates/project-card.md",
       "daily_log": "protocol/templates/daily-log.md",
       "weekly_meta": "protocol/templates/weekly-meta.yaml",
-      "weekly_report": "protocol/templates/weekly-report.md",
-      "weekly_product": "protocol/templates/weekly-product.md"
+      "weekly_report": "protocol/templates/weekly-report.md"
     }
   },
   "changelog": [
     {
+      "version": "2.0.0",
+      "date": "2026-11-24",
+      "summary": "Privacy-first manual progress sync: zero agent-rule injection (no global or project auto-triggers), explicit --project-dir local allowlist, Git pre-commit hook scanning external paths/secrets/PII, 64KiB strict path allowlist, zero telemetry, read-only (pull) collaborators, mandatory preview + explicit --confirm before push, and no silent script updates."
+    },
+    {
       "version": "1.1.1",
       "date": "2026-11-24",
-      "summary": "Require explicit scope choice (--project-dir vs --global vs --no-agent-md) before writing rules, clarify advisor non-install flow, and align regular Monday deadline to 19:00."
-    },
-    {
-      "version": "1.1.0",
-      "date": "2026-11-24",
-      "summary": "Zero-prompt init (yao-research-memory), git-pull self-updating hub, schedule-driven pure AI MVP weekly report, offline queue, and transparent receipt."
-    },
-    {
-      "version": "1.0.0",
-      "date": "2026-11-24",
-      "summary": "Initial release of Public Hub + Private Student Spoke architecture."
+      "summary": "Require explicit scope choice before writing rules and set Monday 19:00 deadline."
     }
   ]
 }
