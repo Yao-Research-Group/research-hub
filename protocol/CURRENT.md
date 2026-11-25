@@ -1,62 +1,53 @@
-# 课题组科研协作与周报同步协议（v3.0 · 强白名单可审计版）
+# 课题组科研协作与周报同步协议（v3.1.0 · 安全加固版）
 
-> 本协议中心位于 `~/.yao-research/hub/protocol/CURRENT.md`。**绝不触碰任何全局 AI 规则文件（`~/.claude`/`~/.codex`/`~/.gemini`/`~/.cursor`）**；一切同步严格围栏在本人亲口登记的白名单科研目录内，默认仅授权导师 `taoyao2005` 可见（可自愿通过 `--collaborators` 加同组队友互看代码）。
-
----
-
-## 1. 安全围栏与两档同步模式
-
-- **目录围栏（Hard Directory Jail）**：
-  - 只有通过 `yao_sync.py init --project-dir "<科研目录>"` 登记进本地 `0600` 策略文件 `~/.yao-research/local-policy.json` 的目录才能触发同步；任何跨目录、未登记目录、符号链接或 `..` 路径逃逸直接硬拦截（退出码 `5`）。
-- **两种安装模式（均零全局入侵）**：
-  1. `--mode manual`（默认）：完全不改任何 `AGENTS.md` / `CLAUDE.md`，当做清晰好用的纯命令行上传工具使用。
-  2. `--mode project-rule`：**仅在授权的白名单科研目录内**写入 `<project_dir>/AGENTS.md`（及同目录独立 `CLAUDE.md`），让 AI 在这个科研项目里推进阶段工作或收尾时顺滑调用 `yao_sync.py`，完全无感且绝不波及机器上的其他目录或私人对话。
-- **两种推送确认策略（`--confirm-mode`）**：
-  1. `confirm`（默认）：`preview` 展示待传清单与汇报明文，用户确认后带 `--confirm` 推送。
-  2. `auto-in-allowlist`：白名单目录内上传 `progress/`、`code/`、`weekly/<W>/artifacts/`、`sessions/` 时免交互无感直推；**硬例外**：凡新增或修改学生本人判断页 `weekly/*/judgment.md`，一律仍需 `--confirm`（确保符合“判断页必须由本人确认”的要求）。
+> 本协议中心位于 `~/.yao-research/hub/protocol/CURRENT.md`。**绝不触碰任何全局 AI 规则文件；试用阶段默认且推荐只开放 `--mode manual` + `confirm` 确认码绑定模式（`--confirm-mode auto-in-allowlist` 与 `sessions/` 上传在试用期暂停）。**
 
 ---
 
-## 2. 可审计资产与分层护栏（不再误杀代码与图表）
+## 1. 安全围栏与目录隔离规则
 
-- **私有库允许目录**：
-  - `progress/YYYY-MM-DD.md`：日常今日进展摘要
-  - `weekly/YYYY-Www/{evidence.md,judgment.md,report.md,meta.yaml}`：双轨周报（AI 证据页 + 本人判断页）
-  - `weekly/YYYY-Www/artifacts/<子路径>`：本周实验图表（`.png`/`.jpg`/`.pdf`）、结果表（`.csv`/`.json`）、关键脚本
-  - `code/<子路径>`：白名单项目同步的代码与配置，供导师 AI 直接拉取并扫视审计
-  - `sessions/YYYY-MM-DD*.md`：（可选）本白名单课题目录内经脱敏的工作讨论摘要
-- **Tier-1 硬拦截（`audit_paths` 与 Git `pre-commit` 双拦截）**：
-  - 白名单外路径、符号链接、`.env*`/`*.pem`/`*.key`/`*secret*`/`*credential*`/`*cookie*`、`__pycache__`/`.venv`/`wandb` 等缓存目录、模型权重与压缩包（`.pt`/`.ckpt`/`.safetensors`/`.parquet`/`.zip`/`.tar.gz`）、单文件超过 **10 MiB**、以及文本内真实私钥/API Token/带签名链接。
-- **Tier-2 软审计提醒（输出 `[WARN]`，不阻塞合法上传）**：
-  - 汇报 `.md` 正文出现 `/Users/...`、`E:/...`、`OneDrive` 等**本机死链**（提示改为 `attach`/`sync-code` 后的仓库相对路径）；
-  - 汇报正文遗留 **AI 草稿提示语**（如 `本地审阅草稿`、`先生成 diff 并由用户确认`、`请确认是否上传`）；
-  - `evidence.md` 超过 6,000 字符（约 2 页）、`judgment.md` 超过 800 字符或暂缺、以及汇报正文出现邮箱/手机号 PII 时提醒确认。
+- **课题目录校验（拒绝过宽目录）**：`init --project-dir` 必须精确到具体的课题子目录，程序强制拒绝 `/`、`$HOME`、`~/Desktop`、`~/Documents`、`~/Downloads`、`~/Projects`、`~/dev` 及私有库/协议中心祖先目录（退出码 `2`）。
+- **试用期锁定 `confirm` + `--confirm-hash` 确认码**：
+  - 任何本地变更都必须先跑 `preview` 展示全部清单与**完整未截断正文**，生成 12 位 SHA256 确认码（`last_preview_hash`）；
+  - `push` 时**必须携带完全匹配的 `--confirm-hash <12位码>`**。未跑 `preview`、预览后修改了文件、或只传旧 `--confirm` 一律硬拦截（退出码 `6`）。
+- **来源清单（`provenance.json`, `0600`）**：
+  - `code/*` 与 `weekly/*/artifacts/*` 中的任何新增/修改文件，**必须经过 `sync-code` 或 `attach` 从白名单目录导入**并登记哈希；直接手放进仓库 `code/` 或绕过工具篡改会在 `preview`/`push` 阶段被硬拦截（退出码 `5`）。
+- **多项目分库建议**：若你同时推进多个课题且需与不同队友共享，**务必为不同项目指定独立 `--repo-name` 与 `--repo-dir`**，避免同一仓库的协作者互相看见其他课题代码。
 
 ---
 
-## 3. 日常上传与周一双轨周报标准流程（截止周一 19:00）
+## 2. 可审计资产导入与分层拦截
 
-### 第一步：把本周代码、图表和结果文件送进私有库（不再写本机死链！）
+- **`sync-code`（严格纯源码，默认仅已跟踪文件）**：
+  - **绝不上传**任何点开头文件/目录（`.netrc`、`.env`、`.npmrc`、`.pypirc`、`.claude/`、`.vscode/`、`.cursor/`、`.git/`）；
+  - **仅同步明确源码扩展名**（`.py`, `.ipynb`, `.sh`, `.yaml`, `.yml`, `.toml`, `.ini`, `.cfg`, `.md`, `.tex`, `.bib`, `.c/.cpp/.cu/.rs/.go/.ts/.js`, `.sbatch`, `.txt` 等，外加 `Makefile`/`Dockerfile`/`requirements.txt`/`pyproject.toml`）；
+  - 若源目录在 Git 仓库内，默认仅拉取 `git ls-files` 已跟踪源码（加 `--include-untracked` 才扫未跟踪源码）。
+  - **数据表（`.csv`/`.tsv`/`.json`/`.jsonl`）、实验图（`.png`/`.jpg`/`.pdf`）** 绝不会在 `sync-code` 中顺带上传，必须用 `attach` 逐个显式指定！
+- **`attach`（显式附加实验图与结果表）**：用于把白名单目录内指定结果表、图和 PDF 放入 `weekly/<W>/artifacts/` 或 `code/`。
+- **Tier-1 硬拦截**：私钥头、GitHub/OpenAI/HuggingFace/AWS/WandB Token、带密码连接串 URL、硬编码 `password = "..."`、`api_key = "..."`、飞书/Slack/钉钉/企微 Webhook、`.netrc`/`kaggle.json`/凭据 JSON、大模型权重与压缩包（`.pt`/`.safetensors`/`.parquet`/`.zip`）、单文件 > **10 MiB**、18 位身份证号（全文件拦截）及数据表（`.csv`/`.tsv`/`.jsonl`）中的手机号。
+- **Tier-2 软提醒**：汇报 `.md` 正文出现本机绝对路径死链（`/Users/...`、`E:/...`）、AI 草稿提示残留、或正文中邮箱/手机号，输出 `[WARN]` 提醒本人确认。
 
-```bash
-# 附加实验图表/CSV结果到 weekly/<week>/artifacts/（自动打印可用于 evidence.md 的相对链接）
-python3 ~/.yao-research/hub/scripts/yao_sync.py attach --from-dir "<当前科研目录>" figures/eval.png results/metrics.csv
+---
 
-# 同步当前项目的干净源码树到 code/（自动跳过 .git / .venv / __pycache__ / gitignore / 密钥 / 大权重）
-python3 ~/.yao-research/hub/scripts/yao_sync.py sync-code --from-dir "<当前科研目录>"
-```
+## 3. 日常与周一双轨周报标准三步（截止周一 19:00）
 
-### 第二步：生成双轨周报（AI 写证据 + 人写判断）
+1. **按需导入源码、图表与撰写周报**：
+   ```bash
+   # 仅同步干净源码（可加 --delete 同步清理源端已删文件）
+   python3 ~/.yao-research/hub/scripts/yao_sync.py sync-code --from-dir "<当前科研目录>" --source "<课题子目录>"
 
-1. **`weekly/<YYYY-Www>/evidence.md`（AI 生成，≤ 2 页）**：严格按照 [`prompts/student-evidence.md`](prompts/student-evidence.md) 从代码提交、结果文件、图表与实验日志提取事实；**每条结论附仓库内相对链接**（如 `[metrics.csv](artifacts/metrics.csv)`、`[train.py](../../code/<项目>/train.py)`），必填“失败的尝试”与“矛盾/不确定之处”。
-2. **`weekly/<YYYY-Www>/judgment.md`（学生本人撰写/口述整理，≤ 半页约 300 字）**：按 [`prompts/student-judgment-guide.md`](prompts/student-judgment-guide.md) 回答 5 个核心问题（重要结论、假设认知变化、下一步与明确放弃项、最需解答的一个问题、亲自核对了哪些证据内容），并确认 `weekly/<YYYY-Www>/meta.yaml` 中的 `meeting_request`（`none` / `group` / `1on1` / `thu_review` / `sat_product`）。
+   # 显式附加指定实验图与结果表
+   python3 ~/.yao-research/hub/scripts/yao_sync.py attach --from-dir "<当前科研目录>" results/metrics.csv figures/eval.png
+   ```
+   按 [`prompts/student-evidence.md`](prompts/student-evidence.md) 与 [`prompts/student-judgment-guide.md`](prompts/student-judgment-guide.md) 整理 `weekly/<W>/evidence.md`（≤ 2 页，全相对链接）与 `weekly/<W>/judgment.md`（本人判断 ≤ 300 字）。
 
-### 第三步：预览或一条龙上传
+2. **预览清单与完整明文，拿到 `confirm-hash`**：
+   ```bash
+   python3 ~/.yao-research/hub/scripts/yao_sync.py preview --from-dir "<当前科研目录>"
+   # 如需逐行检查代码文件内容，可加 --full-code
+   ```
 
-```bash
-# 查看文件清单、汇报明文与 Tier-2 提醒
-python3 ~/.yao-research/hub/scripts/yao_sync.py preview --from-dir "<当前科研目录>"
-
-# 一条龙附加产物 + 同步代码 + 提交推送（confirm 模式或含 judgment.md 时加 --confirm）
-python3 ~/.yao-research/hub/scripts/yao_sync.py upload --from-dir "<当前科研目录>" --attach results/metrics.csv --sync-code . --mode weekly --confirm
-```
+3. **经本人确认后，携带精确 `confirm-hash` 提交推送**：
+   ```bash
+   python3 ~/.yao-research/hub/scripts/yao_sync.py push --confirm-hash <preview输出的12位确认码> --from-dir "<当前科研目录>"
+   ```

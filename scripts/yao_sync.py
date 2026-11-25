@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Yao Research Group v3.0: directory-jailed seamless research sync CLI.
+"""Yao Research Group v3.1.0: hardened directory-jailed research sync CLI.
 
 Zero third-party dependencies (Python 3.9+ stdlib only). All I/O uses UTF-8.
 
-Key guarantees:
-  - ZERO global AI-rule modification (never touches ~/.claude, ~/.codex, ~/.gemini, ~/.cursor).
-  - Hard local directory jail (~/.yao-research/local-policy.json, chmod 0600).
-  - Supports code (code/), experimental artifacts/figures (weekly/<W>/artifacts/),
-    daily progress (progress/), dual-track weekly reports (evidence.md + judgment.md),
-    and allowlist-scoped session summaries (sessions/).
-  - Layered guardrails: Tier-1 hard blocks (jail escape, symlinks, secrets, keys, weights, >10MiB);
-    Tier-2 soft warnings (broken local absolute paths in reports, leaked AI draft notes, PII).
+Security guarantees & honest boundaries:
+  - ZERO global AI-rule touch (never reads/writes ~/.claude, ~/.codex, ~/.gemini, ~/.cursor).
+  - Hard project directory validation: rejects /, $HOME, top-level folders, and repo/hub ancestors.
+  - Strict sync-code scope: skips dotfiles/dotdirs (.netrc/.env/.claude/.vscode), defaults to
+    git-tracked explicit source extensions only (CSV/PDF/JSON/figures require explicit `attach`).
+  - Provenance manifest (~/.yao-research/provenance.json, 0600): `preview`/`push` reject any file
+    under code/ or artifacts/ that was not copied via `attach` or `sync-code` from an allowlisted dir.
+  - Preview-to-push hash binding: `preview` computes a 12-char SHA256 digest and displays full
+    un-truncated report plaintext; `push` requires matching `--confirm-hash` (blocks old `--confirm`).
+  - Trial lockdown (v3.1): `auto-in-allowlist` and `sessions/` are disabled until further notice.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import fnmatch
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,12 +32,11 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import urllib.error
 import urllib.request
 
-SCHEMA_VERSION = "3.0.0"
+SCHEMA_VERSION = "3.1.0"
 TZ_SHANGHAI = timezone(timedelta(hours=8))
 DEFAULT_HUB_REPO = "Yao-Research-Group/research-hub"
 DEFAULT_REPO_NAME = "yao-research-memory"
 MAX_SINGLE_FILE_BYTES = 10 * 1024 * 1024  # 10 MiB
-PREVIEW_TEXT_CHAR_LIMIT = 12000
 
 MARKER_START = "<!-- BEGIN YAO-RESEARCH-HUB -->"
 MARKER_END = "<!-- END YAO-RESEARCH-HUB -->"
@@ -46,6 +48,54 @@ ALLOWED_BINARY_ASSET_EXTS: Set[str] = {
     ".webp",
     ".gif",
     ".pdf",
+}
+
+SYNC_CODE_ALLOWED_EXTS: Set[str] = {
+    ".py",
+    ".ipynb",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".md",
+    ".tex",
+    ".bib",
+    ".r",
+    ".m",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".cu",
+    ".cuh",
+    ".rs",
+    ".go",
+    ".java",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".sql",
+    ".sbatch",
+    ".slurm",
+    ".txt",
+    ".patch",
+    ".diff",
+}
+
+SYNC_CODE_ALLOWED_FILENAMES: Set[str] = {
+    "makefile",
+    "dockerfile",
+    "cmakelists.txt",
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "license",
 }
 
 BLOCKED_EXTS: Set[str] = {
@@ -71,11 +121,25 @@ BLOCKED_EXTS: Set[str] = {
     ".db",
     ".sqlite",
     ".sqlite3",
+    ".kdbx",
+    ".jks",
+    ".keystore",
 }
 
 BLOCKED_FILENAME_PATTERNS: Tuple[str, ...] = (
     ".env",
     ".env.*",
+    ".netrc",
+    "_netrc",
+    ".npmrc",
+    ".pypirc",
+    ".dockercfg",
+    "kaggle.json",
+    "auth.json",
+    "token.json",
+    "credentials.json",
+    "*service_account*.json",
+    "*service-account*.json",
     "*.pem",
     "*.key",
     "*.p12",
@@ -88,9 +152,24 @@ BLOCKED_FILENAME_PATTERNS: Tuple[str, ...] = (
     "*secret*",
     "all_keys.json",
     "local-policy.json",
+    "provenance.json",
     ".DS_Store",
     "Thumbs.db",
 )
+
+BLOCKED_DOT_DIRS: Set[str] = {
+    ".claude",
+    ".vscode",
+    ".cursor",
+    ".codex",
+    ".gemini",
+    ".git",
+    ".venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".ipynb_checkpoints",
+}
 
 SKIP_DIR_NAMES: Set[str] = {
     ".git",
@@ -111,20 +190,20 @@ ALLOWED_PATH_PATTERNS = [
     re.compile(r"^README\.md$"),
     re.compile(r"^\.gitignore$"),
     re.compile(r"^profile\.md$"),
-    re.compile(r"^(?:progress|weekly|code|sessions)/\.gitkeep$"),
+    re.compile(r"^(?:progress|weekly|code)/\.gitkeep$"),
     re.compile(r"^progress/\d{4}-\d{2}-\d{2}\.md$"),
     re.compile(r"^weekly/\d{4}-W\d{2}/(?:meta\.yaml|evidence\.md|judgment\.md|report\.md)$"),
     re.compile(r"^weekly/\d{4}-W\d{2}/artifacts/.+$"),
     re.compile(r"^code/.+$"),
-    re.compile(r"^sessions/\d{4}-\d{2}-\d{2}[A-Za-z0-9._-]*\.md$"),
     re.compile(r"^projects/[A-Za-z0-9._-]+\.md$"),
 ]
 
 REPORT_DOC_PATTERNS = [
     re.compile(r"^progress/\d{4}-\d{2}-\d{2}\.md$"),
     re.compile(r"^weekly/\d{4}-W\d{2}/(?:evidence|judgment|report)\.md$"),
-    re.compile(r"^sessions/\d{4}-\d{2}-\d{2}[A-Za-z0-9._-]*\.md$"),
 ]
+
+TABLE_EXTS: Set[str] = {".csv", ".tsv", ".jsonl"}
 
 LOCAL_ABS_PATH_PATTERN = re.compile(
     r"(?:/Users/|/home/|/Volumes/|~/(?:OneDrive|Desktop|Documents|Downloads|Library|dev|Projects)\b"
@@ -139,19 +218,47 @@ AI_DRAFT_LEAK_PATTERNS: Tuple[str, ...] = (
     "AI_DRAFT_PENDING_HUMAN",
 )
 
-SECRET_PATTERN = re.compile(
-    r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"
-    r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
-    r"|\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}"
-    r"|\bBearer\s+[A-Za-z0-9._~-]{20,}"
-    r"|https?://[^\s<>]*[?&#](?:[\w-]*token|api[-_]?key|key|secret|password|"
-    r"[\w-]*signature|sig|auth)=[^\s&#<>]+",
-    re.IGNORECASE,
+SECRET_PATTERNS: Tuple[Tuple[str, re.Pattern], ...] = (
+    ("私钥头", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----")),
+    ("GitHub Token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
+    ("API Secret Key (sk-)", re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}")),
+    ("Bearer Token", re.compile(r"\bBearer\s+[A-Za-z0-9._~-]{20,}", re.IGNORECASE)),
+    ("HuggingFace Token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
+    ("AWS Access Key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("AWS Secret Key", re.compile(r"(?i)aws_secret_access_key\s*[:=]\s*[\"']?[A-Za-z0-9/+=]{20,}[\"']?")),
+    ("WandB API Key", re.compile(r"(?:\bwandb_v1_[A-Za-z0-9_-]{20,}\b|\bWANDB_API_KEY\s*[:=]\s*[\"']?[A-Za-z0-9_-]{20,}[\"']?)", re.IGNORECASE)),
+    ("WandB 40位密钥", re.compile(r"(?i)wandb.{0,80}\b[0-9a-f]{40}\b")),
+    ("带密码连接串 URL", re.compile(r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp|mssql|https?)://[^:\s/@\"']+?:[^@\s/\"']+?@[^\s\"'<>]+", re.IGNORECASE)),
+    ("硬编码密码或密钥赋值", re.compile(r"(?i)\b(?:password|passwd|pwd|api_?key|access_?key|secret_?key|client_?secret|auth_?token|private_?token)\s*[:=]\s*[\"'][^\"'\s]{6,}[\"']")),
+    ("Webhook URL (飞书/Slack/钉钉/企微)", re.compile(r"https://(?:open\.(?:feishu\.cn|larksuite\.com)/open-apis/bot/v2/hook/[A-Za-z0-9-]+|hooks\.slack\.com/services/[A-Za-z0-9/_-]+|oapi\.dingtalk\.com/robot/send\?access_token=[^\s&\"']+|qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=[^\s&\"']+)", re.IGNORECASE)),
+    ("Google/Slack Token", re.compile(r"(?:\bAIza[0-9A-Za-z_-]{35}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}\b)")),
+    ("带认证参数签名 URL", re.compile(r"https?://[^\s<>]*[?&#](?:[\w-]*token|api[-_]?key|key|secret|password|[\w-]*signature|sig|auth)=[^\s&#<>]+", re.IGNORECASE)),
 )
 
+CN_ID_CARD_PATTERN = re.compile(
+    r"(?<!\d)[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)"
+)
 EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 CN_PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 VALID_MEETING_REQUESTS = {"none", "group", "1on1", "thu_review", "sat_product", "all"}
+
+BROAD_HOME_SUBDIRS: Tuple[str, ...] = (
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "OneDrive",
+    "Library",
+    "Pictures",
+    "Movies",
+    "Music",
+    "Applications",
+    "Public",
+    "Projects",
+    "dev",
+    "work",
+    "workspace",
+    "code",
+)
 
 UNFILLED_PLACEHOLDERS = [
     "<用 1–3 句写清动作",
@@ -175,12 +282,27 @@ DEFAULT_ADVISOR_COLLABORATORS = [
 STUDENT_GITIGNORE = """# Secrets, policies & credentials (always ignored)
 .env
 .env.*
+.netrc
+_netrc
+.npmrc
+.pypirc
+.dockercfg
+kaggle.json
+auth.json
+token.json
+credentials.json
+*service_account*.json
+*service-account*.json
 *.key
 *.pem
 *.p12
 *.pfx
+*.kdbx
+*.jks
+*.keystore
 id_rsa*
 id_ed25519*
+id_ecdsa*
 *cookie*
 *credential*
 *secret*
@@ -188,6 +310,10 @@ secrets/
 *.local.json
 all_keys.json
 local-policy.json
+provenance.json
+.claude/
+.vscode/
+.cursor/
 
 # Weights, large tabular dumps & archives (never commit)
 *.pt
@@ -226,7 +352,11 @@ mlruns/
 """
 
 PRE_COMMIT_HOOK_SCRIPT = '''#!/usr/bin/env python3
-"""Native Git pre-commit Tier-1 guardrail installed by Yao Research Hub (v3.0)."""
+"""Native Git pre-commit Tier-1 guardrail installed by Yao Research Hub (v3.1.0).
+
+Note: client-side hooks protect against accidental commits; `git commit --no-verify`
+can bypass client hooks, so rely on `preview` + `--confirm-hash` before pushing.
+"""
 from __future__ import annotations
 
 import fnmatch
@@ -241,48 +371,63 @@ ALLOWED_PATHS = [
     re.compile(r"^README\\.md$"),
     re.compile(r"^\\.gitignore$"),
     re.compile(r"^profile\\.md$"),
-    re.compile(r"^(?:progress|weekly|code|sessions)/\\.gitkeep$"),
+    re.compile(r"^(?:progress|weekly|code)/\\.gitkeep$"),
     re.compile(r"^progress/\\d{4}-\\d{2}-\\d{2}\\.md$"),
     re.compile(r"^weekly/\\d{4}-W\\d{2}/(?:meta\\.yaml|evidence\\.md|judgment\\.md|report\\.md)$"),
     re.compile(r"^weekly/\\d{4}-W\\d{2}/artifacts/.+$"),
     re.compile(r"^code/.+$"),
-    re.compile(r"^sessions/\\d{4}-\\d{2}-\\d{2}[A-Za-z0-9._-]*\\.md$"),
     re.compile(r"^projects/[A-Za-z0-9._-]+\\.md$"),
 ]
 
 ALLOWED_BINARY_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"}
+TABLE_EXTS = {".csv", ".tsv", ".jsonl"}
 BLOCKED_EXTS = {
     ".pt", ".pth", ".ckpt", ".safetensors", ".onnx", ".gguf",
     ".h5", ".hdf5", ".parquet", ".feather",
     ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar",
     ".mp4", ".mov", ".avi", ".db", ".sqlite", ".sqlite3",
+    ".kdbx", ".jks", ".keystore",
 }
 BLOCKED_FILENAMES = (
-    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+    ".env", ".env.*", ".netrc", "_netrc", ".npmrc", ".pypirc", ".dockercfg",
+    "kaggle.json", "auth.json", "token.json", "credentials.json",
+    "*service_account*.json", "*service-account*.json",
+    "*.pem", "*.key", "*.p12", "*.pfx",
     "id_rsa*", "id_ed25519*", "id_ecdsa*",
     "*cookie*", "*credential*", "*secret*",
-    "all_keys.json", "local-policy.json", ".DS_Store", "Thumbs.db",
+    "all_keys.json", "local-policy.json", "provenance.json", ".DS_Store", "Thumbs.db",
 )
 SKIP_DIRS = {
     ".git", ".venv", "venv", "env", "node_modules", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints",
-    "wandb", "mlruns",
+    "wandb", "mlruns", ".claude", ".vscode", ".cursor", ".codex", ".gemini",
 }
 
-SECRET_RE = re.compile(
-    r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"
-    r"|\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b"
-    r"|\\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}"
-    r"|\\bBearer\\s+[A-Za-z0-9._~-]{20,}"
-    r"|https?://[^\\s<>]*[?&#](?:[\\w-]*token|api[-_]?key|key|secret|password|"
-    r"[\\w-]*signature|sig|auth)=[^\\s&#<>]+",
-    re.IGNORECASE,
-)
+SECRET_RES = [
+    re.compile(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----"),
+    re.compile(r"\\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\\b"),
+    re.compile(r"\\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}"),
+    re.compile(r"\\bBearer\\s+[A-Za-z0-9._~-]{20,}", re.IGNORECASE),
+    re.compile(r"\\bhf_[A-Za-z0-9]{20,}\\b"),
+    re.compile(r"\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"),
+    re.compile(r"aws_secret_access_key\\s*[:=]\\s*[\\\"']?[A-Za-z0-9/+=]{20,}[\\\"']?", re.IGNORECASE),
+    re.compile(r"(?:\\bwandb_v1_[A-Za-z0-9_-]{20,}\\b|\\bWANDB_API_KEY\\s*[:=]\\s*[\\\"']?[A-Za-z0-9_-]{20,}[\\\"']?)", re.IGNORECASE),
+    re.compile(r"wandb.{0,80}\\b[0-9a-f]{40}\\b", re.IGNORECASE),
+    re.compile(r"\\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|amqp|mssql|https?)://[^:\\s/@\\\"']+?:[^@\\s/\\\"']+?@[^\\s\\\"'<>]+", re.IGNORECASE),
+    re.compile(r"\\b(?:password|passwd|pwd|api_?key|access_?key|secret_?key|client_?secret|auth_?token|private_?token)\\s*[:=]\\s*[\\\"'][^\\\"'\\s]{6,}[\\\"']", re.IGNORECASE),
+    re.compile(r"https://(?:open\\.(?:feishu\\.cn|larksuite\\.com)/open-apis/bot/v2/hook/[A-Za-z0-9-]+|hooks\\.slack\\.com/services/[A-Za-z0-9/_-]+|oapi\\.dingtalk\\.com/robot/send\\?access_token=[^\\s&\\\"']+|qyapi\\.weixin\\.qq\\.com/cgi-bin/webhook/send\\?key=[^\\s&\\\"']+)", re.IGNORECASE),
+    re.compile(r"(?:\\bAIza[0-9A-Za-z_-]{35}\\b|\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b)"),
+    re.compile(r"https?://[^\\s<>]*[?&#](?:[\\w-]*token|api[-_]?key|key|secret|password|[\\w-]*signature|sig|auth)=[^\\s&#<>]+", re.IGNORECASE),
+]
+CN_ID_CARD_RE = re.compile(r"(?<!\\d)[1-9]\\d{5}(?:19|20)\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])\\d{3}[\\dXx](?!\\d)")
+CN_PHONE_RE = re.compile(r"(?<!\\d)1[3-9]\\d{9}(?!\\d)")
 
 
 def is_blocked_name(norm_path: str) -> bool:
+    if norm_path in {".gitignore", "progress/.gitkeep", "weekly/.gitkeep", "code/.gitkeep"}:
+        return False
     parts = norm_path.split("/")
-    if any(p in SKIP_DIRS for p in parts[:-1]):
+    if any(p in SKIP_DIRS or p.startswith(".") for p in parts):
         return True
     name = parts[-1]
     lower_name = name.lower()
@@ -323,7 +468,7 @@ def main() -> int:
             errors.append(f"非仓库白名单路径禁止提交：{norm}")
             continue
         if is_blocked_name(norm):
-            errors.append(f"敏感文件、缓存目录或禁用大文件/权重类型禁止提交：{norm}")
+            errors.append(f"敏感文件、点文件/目录或禁用大文件/权重禁止提交：{norm}")
             continue
         work_path = Path(rel)
         if work_path.is_symlink():
@@ -347,9 +492,14 @@ def main() -> int:
         if "\\x00" in text:
             errors.append(f"检测到空字节/二进制内容：{norm}")
             continue
+        is_table = Path(norm).suffix.lower() in TABLE_EXTS
         for idx, line in enumerate(text.splitlines(), start=1):
-            if SECRET_RE.search(line):
-                errors.append(f"检测到疑似私钥/密钥/Token/带签名链接：{norm}:{idx}")
+            if any(rx.search(line) for rx in SECRET_RES):
+                errors.append(f"检测到疑似私钥/密钥/Token/Webhook/硬编码密码：{norm}:{idx}")
+            if CN_ID_CARD_RE.search(line):
+                errors.append(f"检测到疑似身份证号（PII 硬拦截）：{norm}:{idx}")
+            if is_table and CN_PHONE_RE.search(line):
+                errors.append(f"数据表中检测到疑似手机号（PII 硬拦截）：{norm}:{idx}")
 
     if errors:
         for e in errors:
@@ -411,6 +561,10 @@ def iso_week_str(dt: datetime) -> str:
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def parse_simple_yaml(text: str) -> Dict[str, str]:
     result: Dict[str, str] = {}
     for raw_line in text.splitlines():
@@ -436,6 +590,10 @@ def default_policy_file() -> Path:
     return Path("~/.yao-research/local-policy.json").expanduser().resolve()
 
 
+def provenance_file_for_policy(policy_file: Path) -> Path:
+    return policy_file.parent / "provenance.json"
+
+
 def load_hub_configs(hub_dir: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     version_path = hub_dir / "protocol" / "version.json"
     schedule_path = hub_dir / "protocol" / "schedule.json"
@@ -444,23 +602,115 @@ def load_hub_configs(hub_dir: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return version, schedule
 
 
-def load_policy(policy_file: Path) -> Dict[str, Any]:
-    if not policy_file.is_file():
+def load_json_dict(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
         return {}
-    return json.loads(policy_file.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_policy(policy_file: Path, data: Dict[str, Any]) -> None:
-    policy_file.parent.mkdir(parents=True, exist_ok=True)
-    policy_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def save_secure_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
-        os.chmod(policy_file, 0o600)
+        os.chmod(path, 0o600)
     except OSError:
         pass
 
 
+def load_policy(policy_file: Path) -> Dict[str, Any]:
+    return load_json_dict(policy_file)
+
+
+def save_policy(policy_file: Path, data: Dict[str, Any]) -> None:
+    save_secure_json(policy_file, data)
+
+
+def record_provenance(prov_file: Path, repo_dir: Path, new_entries: Dict[str, str]) -> None:
+    if not new_entries:
+        return
+    data = load_json_dict(prov_file)
+    repos = dict(data.get("repos", {}))
+    repo_key = str(repo_dir.resolve(strict=False))
+    repo_map = dict(repos.get(repo_key, {}))
+    repo_map.update(new_entries)
+    repos[repo_key] = repo_map
+    data["repos"] = repos
+    save_secure_json(prov_file, data)
+
+
+def remove_provenance_entries(prov_file: Path, repo_dir: Path, rel_paths: Sequence[str]) -> None:
+    if not rel_paths or not prov_file.is_file():
+        return
+    data = load_json_dict(prov_file)
+    repos = dict(data.get("repos", {}))
+    repo_key = str(repo_dir.resolve(strict=False))
+    if repo_key not in repos:
+        return
+    repo_map = dict(repos[repo_key])
+    changed = False
+    for rel in rel_paths:
+        norm = rel.replace("\\", "/")
+        if norm in repo_map:
+            repo_map.pop(norm, None)
+            changed = True
+    if changed:
+        repos[repo_key] = repo_map
+        data["repos"] = repos
+        save_secure_json(prov_file, data)
+
+
+def get_repo_provenance(prov_file: Path, repo_dir: Path) -> Dict[str, str]:
+    data = load_json_dict(prov_file)
+    repos = data.get("repos", {})
+    repo_key = str(repo_dir.resolve(strict=False))
+    return dict(repos.get(repo_key, {}))
+
+
+def _is_same_or_ancestor(candidate_ancestor: Path, target: Path) -> bool:
+    try:
+        a = str(candidate_ancestor.resolve(strict=False))
+        t = str(target.resolve(strict=False))
+        return os.path.commonpath([a, t]) == a
+    except ValueError:
+        return False
+
+
+def validate_project_dir(project_dir: Path, repo_dir: Path, hub_dir: Path, policy_file: Path) -> Tuple[bool, str]:
+    """Reject overly broad project directories (/, $HOME, top-level folders, or repo/hub ancestors)."""
+    if project_dir.is_symlink():
+        return False, f"科研工作目录不能是符号链接：{project_dir}"
+    if not project_dir.is_dir():
+        return False, f"指定的科研目录不存在：{project_dir}"
+
+    resolved = project_dir.resolve()
+    if resolved == resolved.parent:
+        return False, f"安全拦截：禁止将文件系统根目录 {resolved} 设为科研工作目录。"
+
+    home = Path.home().resolve()
+    if resolved == home:
+        return False, f"安全拦截：禁止将用户主目录 $HOME ({resolved}) 设为科研工作目录，请指定具体课题子目录。"
+
+    broad_paths: Set[Path] = {home / sub for sub in BROAD_HOME_SUBDIRS}
+    for sys_raw in ("/Users", "/home", "/tmp", "/private", "/private/tmp", "/var", "/etc", "/opt", "/usr"):
+        broad_paths.add(Path(sys_raw).resolve(strict=False))
+        broad_paths.add(Path(sys_raw))
+    if resolved in broad_paths or resolved.resolve(strict=False) in {p.resolve(strict=False) for p in broad_paths}:
+        return False, f"安全拦截：目录 {resolved} 范围过宽（含大量非科研私人/系统文件），请精确到具体科研课题子目录。"
+
+    yao_home = (home / ".yao-research").resolve(strict=False)
+    for protected_name, protected_p in (
+        ("私有仓库", repo_dir),
+        ("协议中心", hub_dir),
+        ("本地策略目录", policy_file.parent),
+        ("默认数据目录", yao_home),
+    ):
+        if _is_same_or_ancestor(resolved, protected_p):
+            return False, f"安全拦截：目录 {resolved} 包含{protected_name} ({protected_p})，范围过宽，请选具体课题目录。"
+
+    return True, str(resolved)
+
+
 def is_allowed_path_under_dirs(target: Path, allowed_dirs: Sequence[str]) -> bool:
-    """Strictly verify target.resolve() stays inside at least one allowlisted root."""
     t_str = str(target.resolve(strict=False))
     for raw in allowed_dirs:
         a_str = str(Path(raw).expanduser().resolve(strict=False))
@@ -484,11 +734,6 @@ def assert_path_in_allowed_dirs(path: Path, allowed_dirs: Sequence[str]) -> Tupl
     return True, str(resolved)
 
 
-def assert_allowed_cwd(policy: Dict[str, Any], from_dir: Optional[str]) -> Tuple[bool, str]:
-    target = Path(from_dir).expanduser().resolve() if from_dir else Path.cwd().resolve()
-    return assert_path_in_allowed_dirs(target, policy.get("allowed_project_dirs", []))
-
-
 def find_matching_allowed_root(path: Path, allowed_dirs: Sequence[str]) -> Optional[Path]:
     t_str = str(path.resolve(strict=False))
     best: Optional[Path] = None
@@ -505,12 +750,47 @@ def find_matching_allowed_root(path: Path, allowed_dirs: Sequence[str]) -> Optio
     return best
 
 
+def assert_allowed_cwd(policy: Dict[str, Any], from_dir: Optional[str]) -> Tuple[bool, str]:
+    target = Path(from_dir).expanduser().resolve() if from_dir else Path.cwd().resolve()
+    return assert_path_in_allowed_dirs(target, policy.get("allowed_project_dirs", []))
+
+
+def effective_project_confirm_mode(policy: Dict[str, Any], cwd_path: Path) -> Tuple[str, Optional[str]]:
+    """Resolve per-directory mode; v3.1 trial always enforces confirm."""
+    allowed = policy.get("allowed_project_dirs", [])
+    matched = find_matching_allowed_root(cwd_path, allowed)
+    project_modes = policy.get("project_modes", {})
+    raw_cm = policy.get("confirm_mode", "confirm")
+    if matched is not None and str(matched) in project_modes:
+        raw_cm = project_modes[str(matched)].get("confirm_mode", "confirm")
+    if raw_cm == "auto-in-allowlist":
+        return "confirm", "v3.1 试用阶段已关闭 auto-in-allowlist，本目录按 confirm 确认码模式执行。"
+    return "confirm", None
+
+
+def has_dot_component(rel_path: str) -> bool:
+    norm = rel_path.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+    return any(p.startswith(".") for p in parts)
+
+
+def is_sync_code_allowed_file(fp: Path, rel_path: str) -> bool:
+    if has_dot_component(rel_path):
+        return False
+    name_lower = fp.name.lower()
+    if name_lower in SYNC_CODE_ALLOWED_FILENAMES:
+        return True
+    return fp.suffix.lower() in SYNC_CODE_ALLOWED_EXTS
+
+
 def is_blocked_filename_or_ext(rel_path: str) -> bool:
     norm = rel_path.replace("\\", "/")
+    if norm in {".gitignore", "progress/.gitkeep", "weekly/.gitkeep", "code/.gitkeep"}:
+        return False
     parts = [p for p in norm.split("/") if p]
     if not parts:
         return True
-    if any(p in SKIP_DIR_NAMES for p in parts[:-1]):
+    if any(p in SKIP_DIR_NAMES or p in BLOCKED_DOT_DIRS or p.startswith(".") for p in parts):
         return True
     name = parts[-1]
     lower_name = name.lower()
@@ -528,6 +808,19 @@ def is_allowed_binary_asset(rel_path: str) -> bool:
     if ext not in ALLOWED_BINARY_ASSET_EXTS:
         return False
     return norm.startswith("code/") or "/artifacts/" in norm
+
+
+def scan_text_secrets_and_pii(text: str, rel_label: str, is_table: bool) -> List[str]:
+    errs: List[str] = []
+    for idx, line in enumerate(text.splitlines(), start=1):
+        for pat_name, rx in SECRET_PATTERNS:
+            if rx.search(line):
+                errs.append(f"检测到疑似{pat_name}：{rel_label}:{idx}（Tier-1 硬拦截）")
+        if CN_ID_CARD_PATTERN.search(line):
+            errs.append(f"检测到疑似 18 位身份证号：{rel_label}:{idx}（PII 硬拦截）")
+        if is_table and CN_PHONE_PATTERN.search(line):
+            errs.append(f"数据表中检测到疑似手机号：{rel_label}:{idx}（PII 硬拦截）")
+    return errs
 
 
 def detect_github_login(skip_remote: bool) -> str:
@@ -561,11 +854,12 @@ def print_manual_github_guide(
 ) -> None:
     collab_names = ", ".join(c["github"] for c in collaborators) or "（无外部协作者）"
     print(
-        "\n[需要登录 gh 或按 3 步在网页建私有库]\n"
+        "\n[需要登录 gh 或按 4 步在网页建私有库]\n"
         "  1) 若有 gh，运行 gh auth login 后重跑本命令；\n"
         f"  2) 或打开 https://github.com/new ，仓库名填 {repo_name}，可见性必须选【Private】，\n"
-        f"     然后在 Settings -> Collaborators 添加协作者（组织库选 Read/Pull；个人私有库直接 Add 即可）：{collab_names}；\n"
+        f"     然后在 Settings -> Collaborators 添加协作者（注：个人私有库在 GitHub 平台层实际为可写协作者；组织库可选只读 Read）：{collab_names}；\n"
         f'  3) 执行：python3 ~/.yao-research/hub/scripts/yao_sync.py init --project-dir "{project_dir}" --skip-remote\n'
+        "  4) 先用 preview 获取确认码、用 push --confirm-hash <确认码> --skip-remote 产生首次提交后，再关联推送：\n"
         f"     cd {repo_dir} && git remote add origin https://github.com/<你的GitHub账号>/{repo_name}.git && git push -u origin main\n",
         file=sys.stderr,
     )
@@ -590,7 +884,7 @@ def verify_repo_not_public(full_name: str) -> None:
                 return
 
     url = f"https://api.github.com/repos/{full_name}"
-    req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/3.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "yao-research-hub/3.1"})
     try:
         with urllib.request.urlopen(req, timeout=6) as resp:
             meta = json.loads(resp.read().decode("utf-8"))
@@ -606,9 +900,17 @@ def verify_repo_not_public(full_name: str) -> None:
 def resolve_collaborators(
     default_collaborators: List[Dict[str, str]],
     collaborators_arg: Optional[str],
+    stored_logins: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
     if collaborators_arg is None:
+        if stored_logins is not None:
+            known = {item["github"].lower(): dict(item) for item in default_collaborators}
+            return [
+                known[login.lower()] if login.lower() in known else {"github": login, "role": "collaborator", "permission": "pull"}
+                for login in stored_logins
+            ]
         return list(default_collaborators)
+
     known = {item["github"].lower(): dict(item) for item in default_collaborators}
     resolved: List[Dict[str, str]] = []
     seen: Set[str] = set()
@@ -644,7 +946,7 @@ def ensure_private_remote_repo(
             raise RuntimeError(f"安全拦截：仓库 {full_name} 为 PUBLIC，禁止写入科研资料。")
         print(f"[ok] 复用已有私有仓库：{full_name}")
     else:
-        desc = "Yao Research Group 个人私有科研仓库（仅授权导师/队友可见，含进展/周报/可审计代码图表）"
+        desc = "Yao Research Group 个人私有科研仓库（含进展/周报/可审计代码图表）"
         run_cmd(["gh", "repo", "create", full_name, "--private", "--description", desc])
         verify = json.loads(run_cmd(["gh", "api", f"repos/{full_name}"]).stdout)
         if not verify.get("private", False):
@@ -672,8 +974,8 @@ def ensure_private_remote_repo(
             )
             if fallback.returncode == 0:
                 print(
-                    f"[ok] 已邀请协作者：{collab}（注：GitHub 个人私有库平台层不支持只读 pull，"
-                    "已按标准协作者邀请；汇总脚本 advisor_collect.py 为纯只读，本人可随时在 GitHub Settings 撤销）"
+                    f"[ok] 已邀请协作者：{collab}（诚实说明：GitHub 个人私有库在平台层不支持只读 pull，"
+                    "协作者实际具有可写 Write/Push 权限；advisor_collect.py 仅做只读拉取，本人随时可在 GitHub Settings 撤销）"
                 )
                 continue
             err_text = f"{fallback.stderr}\n{fallback.stdout}".strip()
@@ -709,27 +1011,15 @@ def build_project_rule_block(
     hub_dir: Path,
     confirm_mode: str,
 ) -> str:
-    if confirm_mode == "auto-in-allowlist":
-        confirm_note = (
-            "本目录已启用白名单内无感同步：在完成本目录及其子目录下的科研推进、代码/图表产物整理或项目讨论后，"
-            "可自动同步至 `progress/YYYY-MM-DD.md`、`code/`、`weekly/<W>/artifacts/` 与脱敏的 `sessions/YYYY-MM-DD-*.md`，"
-            "并直接运行 `push` / `upload`；"
-            "**例外**：修改或创建学生本人判断页 `weekly/<W>/judgment.md` 时，必须先完整展示给本人审阅并加 `--confirm`。"
-        )
-    else:
-        confirm_note = (
-            "当前为预览确认模式：整理本目录及其子目录的进展、`evidence.md`、代码/图表或 `sessions/YYYY-MM-DD-*.md` 后，"
-            "先运行 `preview` 向本人展示清单与摘要，获得明确同意后再加 `--confirm` 执行 `push` 或 `upload`。"
-        )
     return "\n".join(
         [
             MARKER_START,
             f"## 课题组科研同步（仅限本白名单目录：`{project_dir.name}`）",
             "",
             f"- 协议中心：`{hub_dir}`（见 `protocol/CURRENT.md`）｜私有仓库：`{repo_dir}`",
-            f"- **硬范围与零全局影响**：只适用于本目录及其子目录内的文件、代码、图表与科研讨论项目；绝不影响本机其他目录的 AI 对话，绝不读取本目录之外的内容，也不写入密钥、大表或模型权重到 `{repo_dir}`。",
-            f"- **触发与上传**：{confirm_note}",
-            f"- 快捷上传：`python3 \"{hub_dir / 'scripts' / 'yao_sync.py'}\" upload --from-dir \"{project_dir}\" ...`",
+            f"- **硬范围与零全局影响**：只适用于本目录及其子目录内的科研材料；绝不影响本机其他目录的 AI 对话，绝不读取本目录之外的内容，也不上传密钥、点文件/点目录、大模型权重或未脱敏敏感表。",
+            "- **v3.1 确认机制**：整理本目录进展、`evidence.md`/`judgment.md`，或经 `sync-code` / `attach` 准备代码与实验图表后，必须先运行 `preview` 展示完整明文与 12 位 `confirm-hash` 确认码，经本人明确同意后再带 `--confirm-hash <确认码>` 执行 `push`（试用阶段暂停免确认直推与 `sessions/` 上传）。",
+            f"- 常用命令：`python3 \"{hub_dir / 'scripts' / 'yao_sync.py'}\" preview --from-dir \"{project_dir}\"`",
             MARKER_END,
         ]
     )
@@ -765,7 +1055,7 @@ def upsert_project_rule_file(
     confirm_mode: str,
     dry_run: bool,
 ) -> List[Path]:
-    """Write or idempotently update project-local AGENTS.md (never touch $HOME)."""
+    """Maintain project-local AGENTS.md AND CLAUDE.md (never touching $HOME)."""
     block = build_project_rule_block(project_dir, repo_dir, hub_dir, confirm_mode)
     agents_md = project_dir / "AGENTS.md"
     touched: List[Path] = []
@@ -773,16 +1063,15 @@ def upsert_project_rule_file(
         touched.append(agents_md)
 
     claude_md = project_dir / "CLAUDE.md"
-    if claude_md.exists():
-        points_to_agents = False
-        if claude_md.is_symlink():
-            try:
-                points_to_agents = claude_md.resolve(strict=False) == agents_md.resolve(strict=False)
-            except OSError:
-                points_to_agents = False
-        if not points_to_agents and claude_md.is_file():
-            if _upsert_marked_block(claude_md, block, dry_run):
-                touched.append(claude_md)
+    points_to_agents = False
+    if claude_md.is_symlink():
+        try:
+            points_to_agents = claude_md.resolve(strict=False) == agents_md.resolve(strict=False)
+        except OSError:
+            points_to_agents = False
+    if not points_to_agents:
+        if _upsert_marked_block(claude_md, block, dry_run):
+            touched.append(claude_md)
     return touched
 
 
@@ -797,7 +1086,7 @@ def is_report_doc_rel_path(rel_path: str) -> bool:
 
 
 def collect_pending_rel_paths(repo_dir: Path) -> List[str]:
-    """Return sorted relative paths of staged, modified tracked, or untracked non-ignored files."""
+    """Return sorted relative paths of staged (ACMR), modified tracked (ACM), or untracked files."""
     if not (repo_dir / ".git").exists():
         return []
     pending: Set[str] = set()
@@ -816,6 +1105,78 @@ def collect_pending_rel_paths(repo_dir: Path) -> List[str]:
     return sorted(pending)
 
 
+def collect_deleted_rel_paths(repo_dir: Path) -> List[str]:
+    """Return sorted relative paths of deleted files (staged D or deleted from working tree)."""
+    if not (repo_dir / ".git").exists():
+        return []
+    deleted: Set[str] = set()
+    for cmd in (
+        ["git", "-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--diff-filter=D"],
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=D"],
+    ):
+        proc = run_cmd(cmd, cwd=repo_dir, check=False)
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                val = line.strip()
+                if val:
+                    deleted.add(val)
+    # Exclude paths that currently exist on disk unless already deleted from working tree & staged
+    final_deleted = []
+    for rel in sorted(deleted):
+        if not (repo_dir / rel).exists():
+            final_deleted.append(rel)
+    return final_deleted
+
+
+def compute_pending_digest(repo_dir: Path, pending: List[str], deleted: List[str]) -> str:
+    """Compute a deterministic 12-hex SHA256 digest binding previewed content to push."""
+    h = hashlib.sha256()
+    for rel in sorted(pending):
+        norm = rel.replace("\\", "/")
+        p = repo_dir / rel
+        if p.is_file() and not p.is_symlink():
+            fhash = sha256_bytes(p.read_bytes())
+        else:
+            fhash = "MISSING"
+        h.update(f"UPSERT\0{norm}\0{fhash}\n".encode("utf-8"))
+    for rel in sorted(deleted):
+        norm = rel.replace("\\", "/")
+        h.update(f"DELETE\0{norm}\n".encode("utf-8"))
+    return h.hexdigest()[:12]
+
+
+def check_pending_provenance(
+    prov_file: Path,
+    repo_dir: Path,
+    pending: List[str],
+) -> List[str]:
+    """Ensure every pending file under code/ or artifacts/ came via attach/sync-code from allowlist."""
+    repo_prov = get_repo_provenance(prov_file, repo_dir)
+    errors: List[str] = []
+    for rel in pending:
+        norm = rel.replace("\\", "/")
+        if norm == "code/.gitkeep":
+            continue
+        if norm.startswith("code/") or "/artifacts/" in norm:
+            p = repo_dir / rel
+            if p.is_symlink() or not p.is_file():
+                continue
+            recorded_hash = repo_prov.get(norm)
+            if not recorded_hash:
+                errors.append(
+                    f"来源围栏拦截：{norm} 未经 attach / sync-code 从白名单科研目录导入，"
+                    "禁止直接往私有库 code/ 或 artifacts/ 放入文件。"
+                )
+                continue
+            actual_hash = sha256_bytes(p.read_bytes())
+            if actual_hash != recorded_hash:
+                errors.append(
+                    f"来源围栏拦截：{norm} 在导入后被本地修改（SHA256 不匹配 provenance 清单），"
+                    "请重新通过 attach / sync-code 从授权目录导入。"
+                )
+    return errors
+
+
 def audit_paths(
     repo_dir: Path,
     rel_paths: List[str],
@@ -827,11 +1188,14 @@ def audit_paths(
 
     for rel in rel_paths:
         norm = rel.replace("\\", "/")
+        if norm.startswith("sessions/"):
+            errors.append(f"v3.1 试用阶段暂停 sessions/ 对话摘要上传：{norm}")
+            continue
         if not is_allowed_repo_rel_path(norm):
             errors.append(f"非白名单仓库路径禁止上传：{norm}")
             continue
         if is_blocked_filename_or_ext(norm):
-            errors.append(f"敏感文件、环境缓存或禁用大模型/压缩文件类型禁止上传：{norm}")
+            errors.append(f"敏感文件、点文件/目录或禁用大模型/压缩文件类型禁止上传：{norm}")
             continue
 
         p = repo_dir / rel
@@ -860,12 +1224,11 @@ def audit_paths(
             errors.append(f"检测到二进制/空字节内容：{norm}")
             continue
 
-        is_report = is_report_doc_rel_path(norm)
-        for idx, line in enumerate(text.splitlines(), start=1):
-            if SECRET_PATTERN.search(line):
-                errors.append(f"检测到疑似私钥/密钥/Token/带签名链接：{norm}:{idx}（已拦截）")
+        is_table = Path(norm).suffix.lower() in TABLE_EXTS
+        errors.extend(scan_text_secrets_and_pii(text, norm, is_table=is_table))
 
-            if is_report:
+        if is_report_doc_rel_path(norm):
+            for idx, line in enumerate(text.splitlines(), start=1):
                 if LOCAL_ABS_PATH_PATTERN.search(line):
                     warnings.append(
                         f"死链提醒：{norm}:{idx} 含本机路径，导师端打不开；建议用 attach/sync-code 上传并改相对路径"
@@ -1018,40 +1381,44 @@ def classify_preview_kind(rel_path: str) -> str:
     return "[asset]"
 
 
-def format_plaintext_preview(repo_dir: Path, rel_paths: List[str]) -> str:
-    if not rel_paths:
-        return "(当前无新增或修改的待同步文件)"
+def format_plaintext_preview(
+    repo_dir: Path,
+    pending: List[str],
+    deleted: List[str],
+    full_code: bool = False,
+) -> str:
+    if not pending and not deleted:
+        return "(当前无新增、修改或待删除的文件)"
 
     summary_lines = ["清单总览："]
-    for rel in rel_paths:
+    for rel in pending:
         p = repo_dir / rel
         kind = classify_preview_kind(rel)
         if not p.is_file():
-            summary_lines.append(f"  - {kind} {rel} (deleted)")
+            summary_lines.append(f"  - {kind} {rel} (missing)")
         else:
             summary_lines.append(f"  - {kind} {rel} ({p.stat().st_size} bytes)")
+    for rel in deleted:
+        summary_lines.append(f"  - [DELETE] {rel}")
 
     blocks: List[str] = ["\n".join(summary_lines)]
-    for rel in rel_paths:
+    for rel in pending:
         norm = rel.replace("\\", "/")
         p = repo_dir / rel
         if not p.is_file():
             continue
         ext = Path(norm).suffix.lower()
-        expand = (
+        is_report = (
             is_report_doc_rel_path(norm)
-            or norm in {"README.md", "profile.md"}
+            or norm in {"README.md", "profile.md", ".gitignore"}
             or re.match(r"^weekly/\d{4}-W\d{2}/meta\.yaml$", norm) is not None
             or norm.startswith("projects/")
         )
+        expand = is_report or (full_code and ext not in ALLOWED_BINARY_ASSET_EXTS)
         if not expand or ext in ALLOWED_BINARY_ASSET_EXTS:
             continue
         size = p.stat().st_size
         text = p.read_text(encoding="utf-8", errors="replace").rstrip("\n")
-        if len(text) > PREVIEW_TEXT_CHAR_LIMIT:
-            head = text[:5500]
-            tail = text[-3500:]
-            text = f"{head}\n\n... [preview truncated {len(text) - 9000} chars] ...\n\n{tail}"
         blocks.append(f"--- BEGIN {rel} ({size} bytes) ---\n{text}\n--- END {rel} ---")
 
     return "\n\n".join(blocks)
@@ -1156,45 +1523,46 @@ def _copy_asset_file(
     repo_dir: Path,
     allowed_dirs: Sequence[str],
     max_bytes: int,
-) -> Tuple[bool, str]:
-    """Validate src_file strictly within jail and copy into repo_dir."""
+) -> Tuple[bool, str, Optional[str]]:
+    """Validate src_file strictly within jail and copy into repo_dir. Returns (ok, rel_or_err, sha256)."""
     if src_file.is_symlink():
-        return False, f"跳过符号链接：{src_file}"
+        return False, f"跳过符号链接：{src_file}", None
     if not src_file.is_file():
-        return False, f"跳过非普通文件：{src_file}"
+        return False, f"跳过非普通文件：{src_file}", None
 
     ok_src, msg_src = assert_path_in_allowed_dirs(src_file, allowed_dirs)
     if not ok_src:
-        return False, msg_src
+        return False, msg_src, None
 
     try:
         rel_target = str(dest_file.resolve(strict=False).relative_to(repo_dir.resolve(strict=False))).replace("\\", "/")
     except ValueError:
-        return False, f"目标路径越出仓库范围：{dest_file}"
+        return False, f"目标路径越出仓库范围：{dest_file}", None
 
     if not is_allowed_repo_rel_path(rel_target):
-        return False, f"目标路径不在仓库白名单内：{rel_target}"
+        return False, f"目标路径不在仓库白名单内：{rel_target}", None
     if is_blocked_filename_or_ext(rel_target):
-        return False, f"敏感/缓存/大模型扩展名文件被拦截：{src_file.name}"
+        return False, f"敏感/点文件或禁用扩展名被拦截：{src_file.name}", None
 
     data = src_file.read_bytes()
     if len(data) > max_bytes:
-        return False, f"文件超过 {max_bytes // (1024 * 1024)} MiB 上限，已跳过：{src_file.name}"
+        return False, f"文件超过 {max_bytes // (1024 * 1024)} MiB 上限，已跳过：{src_file.name}", None
 
     if not is_allowed_binary_asset(rel_target):
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
-            return False, f"未知二进制文件已跳过：{src_file.name}"
+            return False, f"未知二进制文件已跳过：{src_file.name}", None
         if "\x00" in text:
-            return False, f"含空字节二进制内容已跳过：{src_file.name}"
-        for idx, line in enumerate(text.splitlines(), start=1):
-            if SECRET_PATTERN.search(line):
-                return False, f"检测到疑似私钥/密钥/Token（{src_file.name}:{idx}），已拒绝复制"
+            return False, f"含空字节二进制内容已跳过：{src_file.name}", None
+        is_table = Path(rel_target).suffix.lower() in TABLE_EXTS
+        sec_errs = scan_text_secrets_and_pii(text, src_file.name, is_table=is_table)
+        if sec_errs:
+            return False, sec_errs[0], None
 
     dest_file.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_file, dest_file)
-    return True, rel_target
+    return True, rel_target, sha256_bytes(data)
 
 
 def _resolve_input_source(raw_path: str, base_dir: Path) -> Path:
@@ -1204,11 +1572,32 @@ def _resolve_input_source(raw_path: str, base_dir: Path) -> Path:
     return base_dir / expanded
 
 
+def _git_root_for(dir_path: Path) -> Optional[Path]:
+    if not shutil.which("git"):
+        return None
+    proc = run_cmd(["git", "rev-parse", "--show-toplevel"], cwd=dir_path, check=False)
+    if proc.returncode == 0 and proc.stdout.strip():
+        return Path(proc.stdout.strip()).resolve()
+    return None
+
+
+def _git_tracked_files_under(source_root: Path) -> Optional[List[Path]]:
+    if _git_root_for(source_root) is None:
+        return None
+    proc = run_cmd(["git", "-c", "core.quotePath=false", "ls-files", "-z", "--", "."], cwd=source_root, check=False)
+    if proc.returncode != 0:
+        return None
+    out: List[Path] = []
+    for item in proc.stdout.split("\0"):
+        if item:
+            p = source_root / item
+            if p.exists() or p.is_symlink():
+                out.append(p)
+    return sorted(out)
+
+
 def _git_check_ignored_set(source_root: Path, candidate_paths: List[Path]) -> Set[Path]:
-    if not candidate_paths or not shutil.which("git"):
-        return set()
-    probe = run_cmd(["git", "rev-parse", "--is-inside-work-tree"], cwd=source_root, check=False)
-    if probe.returncode != 0 or probe.stdout.strip() != "true":
+    if not candidate_paths or _git_root_for(source_root) is None:
         return set()
     rel_strs: List[str] = []
     rel_to_abs: Dict[str, Path] = {}
@@ -1239,6 +1628,7 @@ def _git_check_ignored_set(source_root: Path, candidate_paths: List[Path]) -> Se
 def perform_attach(
     repo_dir: Path,
     allowed_dirs: Sequence[str],
+    prov_file: Path,
     from_dir_path: Path,
     week: str,
     target: str,
@@ -1246,9 +1636,10 @@ def perform_attach(
     raw_files: List[str],
     max_bytes: int,
 ) -> Tuple[List[str], List[str], int]:
-    """Attach files/dirs from within allowlist into weekly/<week>/artifacts/ or code/. Returns (copied_rels, skipped_msgs, exit_code)."""
+    """Explicitly attach figures/tables/PDFs/code from within allowlist and record provenance."""
     copied: List[str] = []
     skipped: List[str] = []
+    prov_entries: Dict[str, str] = {}
     repo_resolved = repo_dir.resolve(strict=False)
 
     if target == "artifacts":
@@ -1257,8 +1648,8 @@ def perform_attach(
         dest_root = repo_dir / "code"
     if subdir:
         clean_sub = subdir.strip("/").replace("\\", "/")
-        if ".." in Path(clean_sub).parts:
-            return [], [f"无效 --subdir（含 ..）：{subdir}"], 5
+        if ".." in Path(clean_sub).parts or any(p.startswith(".") for p in Path(clean_sub).parts):
+            return [], [f"无效 --subdir：{subdir}"], 5
         dest_root = dest_root / clean_sub
 
     for raw in raw_files:
@@ -1273,46 +1664,61 @@ def perform_attach(
             continue
 
         if src.is_file():
+            if src.name.startswith("."):
+                skipped.append(f"跳过点开头敏感文件：{src.name}")
+                continue
             dst = dest_root / src.name
-            ok_cp, info = _copy_asset_file(src, dst, repo_dir, allowed_dirs, max_bytes)
-            if ok_cp:
+            ok_cp, info, fhash = _copy_asset_file(src, dst, repo_dir, allowed_dirs, max_bytes)
+            if ok_cp and fhash:
                 copied.append(info)
+                prov_entries[info] = fhash
             else:
                 skipped.append(info)
             continue
 
         if src.is_dir():
+            if src.name.startswith("."):
+                skipped.append(f"跳过点开头目录：{src.name}")
+                continue
             base_name = src.name
             for root_str, dirs, files in os.walk(src, followlinks=False):
                 root_p = Path(root_str)
                 dirs[:] = sorted(
-                    d for d in dirs if d not in SKIP_DIR_NAMES and not (root_p / d).is_symlink()
+                    d for d in dirs if d not in SKIP_DIR_NAMES and not d.startswith(".") and not (root_p / d).is_symlink()
                 )
                 for fname in sorted(files):
+                    if fname.startswith("."):
+                        skipped.append(f"跳过点开头文件：{fname}")
+                        continue
                     f_p = root_p / fname
                     if f_p.resolve(strict=False) == repo_resolved or str(f_p.resolve(strict=False)).startswith(str(repo_resolved) + os.sep):
                         continue
                     rel_under = f_p.relative_to(src)
                     dst = dest_root / base_name / rel_under
-                    ok_cp, info = _copy_asset_file(f_p, dst, repo_dir, allowed_dirs, max_bytes)
-                    if ok_cp:
+                    ok_cp, info, fhash = _copy_asset_file(f_p, dst, repo_dir, allowed_dirs, max_bytes)
+                    if ok_cp and fhash:
                         copied.append(info)
+                        prov_entries[info] = fhash
                     else:
                         skipped.append(info)
+
+    record_provenance(prov_file, repo_dir, prov_entries)
     return copied, skipped, 0
 
 
 def perform_sync_code(
     repo_dir: Path,
     allowed_dirs: Sequence[str],
+    prov_file: Path,
     from_dir_path: Path,
     source_arg: str,
     dest_arg: Optional[str],
     max_files: int,
     delete_extra: bool,
+    include_untracked: bool,
     max_bytes: int,
 ) -> Tuple[List[str], List[str], List[str], str, int]:
-    """Sync source tree inside allowlist into repo_dir/code/<dest>. Returns (copied, skipped, deleted, dest_rel, rc)."""
+    """Strictly sync source-code extensions only (no dotfiles/dotdirs/CSV/PDF/JSON)."""
     src_raw = _resolve_input_source(source_arg, from_dir_path)
     if src_raw.is_symlink():
         return [], [f"[BLOCK] 拒绝符号链接目录：{src_raw}"], [], "", 5
@@ -1328,7 +1734,7 @@ def perform_sync_code(
         clean_dest = dest_arg.strip("/").replace("\\", "/")
         if not clean_dest.startswith("code/"):
             clean_dest = f"code/{clean_dest}"
-        if ".." in Path(clean_dest).parts:
+        if ".." in Path(clean_dest).parts or any(p.startswith(".") for p in Path(clean_dest).parts[1:]):
             return [], [f"无效 --dest 路径：{dest_arg}"], [], "", 5
     else:
         clean_dest = f"code/{matched_root.name}"
@@ -1338,38 +1744,55 @@ def perform_sync_code(
 
     candidates: List[Path] = []
     skipped: List[str] = []
-    for root_str, dirs, files in os.walk(src_root, followlinks=False):
-        root_p = Path(root_str)
-        kept_dirs: List[str] = []
-        for d in sorted(dirs):
-            dp = root_p / d
-            if d in SKIP_DIR_NAMES or dp.is_symlink():
-                continue
-            dp_res = dp.resolve(strict=False)
-            if dp_res == repo_resolved or str(dp_res).startswith(str(repo_resolved) + os.sep):
-                continue
-            kept_dirs.append(d)
-        dirs[:] = kept_dirs
 
-        for fname in sorted(files):
-            fp = root_p / fname
-            if fp.is_symlink():
-                skipped.append(f"跳过符号链接：{fp.name}")
-                continue
-            candidates.append(fp)
+    tracked = _git_tracked_files_under(src_root)
+    if tracked is not None and not include_untracked:
+        candidates = tracked
+    else:
+        for root_str, dirs, files in os.walk(src_root, followlinks=False):
+            root_p = Path(root_str)
+            kept_dirs: List[str] = []
+            for d in sorted(dirs):
+                dp = root_p / d
+                if d in SKIP_DIR_NAMES or d.startswith(".") or dp.is_symlink():
+                    continue
+                dp_res = dp.resolve(strict=False)
+                if dp_res == repo_resolved or str(dp_res).startswith(str(repo_resolved) + os.sep):
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
+
+            for fname in sorted(files):
+                fp = root_p / fname
+                if fname.startswith("."):
+                    skipped.append(f"跳过点开头文件：{fname}")
+                    continue
+                if fp.is_symlink():
+                    skipped.append(f"跳过符号链接：{fp.name}")
+                    continue
+                candidates.append(fp)
 
     ignored_set = _git_check_ignored_set(src_root, candidates)
-    filtered: List[Path] = []
+    copied: List[str] = []
+    prov_entries: Dict[str, str] = {}
+    desired_rels: Set[str] = set()
+
     for fp in candidates:
         if fp in ignored_set:
             continue
-        filtered.append(fp)
-
-    copied: List[str] = []
-    desired_rels: Set[str] = set()
-    for fp in filtered:
-        rel_under = fp.relative_to(src_root)
+        if fp.is_symlink():
+            skipped.append(f"跳过符号链接：{fp.name}")
+            continue
+        if not fp.is_file():
+            continue
+        try:
+            rel_under = fp.relative_to(src_root)
+        except ValueError:
+            continue
         rel_str = str(rel_under).replace("\\", "/")
+        if not is_sync_code_allowed_file(fp, rel_str):
+            skipped.append(f"非源码白名单或含点路径已跳过（数据表/PDF/图片请改用 attach）：{rel_str}")
+            continue
         if is_blocked_filename_or_ext(rel_str):
             skipped.append(f"跳过敏感/禁用文件：{rel_str}")
             continue
@@ -1377,12 +1800,15 @@ def perform_sync_code(
             skipped.append(f"已达到单次 --max-files {max_files} 上限，截断剩余文件（如 {rel_str}）")
             break
         dst = dest_root / rel_under
-        ok_cp, info = _copy_asset_file(fp, dst, repo_dir, allowed_dirs, max_bytes)
-        if ok_cp:
+        ok_cp, info, fhash = _copy_asset_file(fp, dst, repo_dir, allowed_dirs, max_bytes)
+        if ok_cp and fhash:
             copied.append(info)
+            prov_entries[info] = fhash
             desired_rels.add(info)
         else:
             skipped.append(info)
+
+    record_provenance(prov_file, repo_dir, prov_entries)
 
     deleted: List[str] = []
     if delete_extra and dest_root.is_dir():
@@ -1405,21 +1831,37 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     if not args.project_dir:
         print(
-            "[error] 必须显式指定一个由本人确认的科研工作目录：--project-dir \"<科研目录>\"。\n"
+            "[error] 必须显式指定一个具体科研课题目录：--project-dir \"<科研目录>\"。\n"
             "本工具绝不触碰任何全局 Agent 规则文件（~/.claude / ~/.codex / ~/.gemini / ~/.cursor）。",
             file=sys.stderr,
         )
         return 2
 
-    project_dir = Path(args.project_dir).expanduser().resolve()
-    if not project_dir.is_dir():
-        print(f"[error] 指定的科研目录不存在：{project_dir}。请确认真实路径后重试。", file=sys.stderr)
+    raw_proj = Path(args.project_dir).expanduser()
+    ok_dir, dir_msg = validate_project_dir(raw_proj, repo_dir, hub_dir, policy_file)
+    if not ok_dir:
+        print(f"[error] {dir_msg}", file=sys.stderr)
+        return 2
+    project_dir = Path(dir_msg)
+
+    confirm_mode = getattr(args, "confirm_mode", "confirm") or "confirm"
+    if confirm_mode == "auto-in-allowlist":
+        print(
+            "[BLOCK] v3.1 试用阶段仅开放 confirm 模式，暂不允许免确认自动推送（auto-in-allowlist 已临时关闭）。",
+            file=sys.stderr,
+        )
         return 2
 
+    policy = load_policy(policy_file)
     version_cfg, _ = load_hub_configs(hub_dir)
     repo_name = args.repo_name or version_cfg.get("default_repo_name", DEFAULT_REPO_NAME)
     default_collaborators = version_cfg.get("required_collaborators", DEFAULT_ADVISOR_COLLABORATORS)
-    collaborators = resolve_collaborators(default_collaborators, getattr(args, "collaborators", None))
+    stored_collabs: Optional[List[str]] = policy.get("collaborators") if isinstance(policy.get("collaborators"), list) else None
+    collaborators = resolve_collaborators(
+        default_collaborators,
+        getattr(args, "collaborators", None),
+        stored_logins=stored_collabs,
+    )
 
     existing_origin_slug: Optional[str] = None
     if (repo_dir / ".git").exists():
@@ -1456,10 +1898,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         repo_dir.mkdir(parents=True, exist_ok=True)
         if not (repo_dir / ".git").exists():
             run_cmd(["git", "init", "-b", "main"], cwd=repo_dir)
-        if not run_cmd(["git", "config", "user.name"], cwd=repo_dir, check=False).stdout.strip():
-            run_cmd(["git", "config", "user.name", owner], cwd=repo_dir)
-        if not run_cmd(["git", "config", "user.email"], cwd=repo_dir, check=False).stdout.strip():
-            run_cmd(["git", "config", "user.email", f"{owner}@users.noreply.github.com"], cwd=repo_dir)
+        # Always pin local commit identity inside repo_dir so personal git email never leaks
+        run_cmd(["git", "config", "--local", "user.name", owner], cwd=repo_dir)
+        run_cmd(["git", "config", "--local", "user.email", f"{owner}@users.noreply.github.com"], cwd=repo_dir)
 
     collab_label = "、".join(f"`{c['github']}`" for c in collaborators) or "仅本人"
     write_if_missing(repo_dir / ".gitignore", STUDENT_GITIGNORE, args.dry_run)
@@ -1467,8 +1908,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         repo_dir / "README.md",
         (
             f"# {owner} · 个人私有科研仓库\n\n"
-            f"- 可见性：Private（仅本人与授权协作者 {collab_label} 可见；汇总脚本仅只读拉取）\n"
-            "- 允许目录：`progress/YYYY-MM-DD.md`、`weekly/YYYY-Www/{evidence.md,judgment.md,report.md,artifacts/}`、`code/`、`sessions/`、`projects/`\n"
+            f"- 可见性：Private（协作者：{collab_label}；个人私有库协作者在平台层可读写，组织库可只读 pull；汇总脚本仅执行只读拉取）\n"
+            "- 允许目录：`progress/YYYY-MM-DD.md`、`weekly/YYYY-Www/{evidence.md,judgment.md,report.md,artifacts/}`、`code/`、`projects/`\n"
         ),
         args.dry_run,
     )
@@ -1483,32 +1924,39 @@ def cmd_init(args: argparse.Namespace) -> int:
         ),
         args.dry_run,
     )
-    for sub in ("progress", "weekly", "code", "sessions"):
+    for sub in ("progress", "weekly", "code"):
         write_if_missing(repo_dir / sub / ".gitkeep", "", args.dry_run)
 
     install_pre_commit_hook(repo_dir, args.dry_run)
 
     mode = getattr(args, "mode", "manual") or "manual"
-    confirm_mode = getattr(args, "confirm_mode", "confirm") or "confirm"
-
     touched_rule_files: List[Path] = []
     if mode == "project-rule":
         touched_rule_files = upsert_project_rule_file(
             project_dir=project_dir,
             repo_dir=repo_dir,
             hub_dir=hub_dir,
-            confirm_mode=confirm_mode,
+            confirm_mode="confirm",
             dry_run=args.dry_run,
         )
 
-    policy = load_policy(policy_file)
     allowed_dirs = list(policy.get("allowed_project_dirs", []))
     proj_str = str(project_dir)
     if proj_str not in allowed_dirs:
         allowed_dirs.append(proj_str)
 
     project_modes = dict(policy.get("project_modes", {}))
-    project_modes[proj_str] = {"mode": mode, "confirm_mode": confirm_mode}
+    project_modes[proj_str] = {"mode": mode, "confirm_mode": "confirm"}
+
+    collab_logins = [c["github"] for c in collaborators]
+    non_advisor = [c["github"] for c in collaborators if c.get("role") != "advisor"]
+    if len(allowed_dirs) > 1 and non_advisor:
+        print(
+            f"[WARN] 当前共用了同一个私有库 {full_repo_name} 绑定 {len(allowed_dirs)} 个科研目录，"
+            f"且协作者包含非导师账号 {non_advisor}（会互相看到所有子目录代码）。"
+            "如需不同项目间队友隔离，请对第二项目单独指定 --repo-name 与 --repo-dir。",
+            file=sys.stderr,
+        )
 
     policy.update(
         {
@@ -1517,9 +1965,10 @@ def cmd_init(args: argparse.Namespace) -> int:
             "hub_dir": str(hub_dir),
             "github_login": owner,
             "repo": full_repo_name,
+            "collaborators": collab_logins,
             "mode": mode,
-            "confirm_mode": confirm_mode,
-            "require_confirm": confirm_mode != "auto-in-allowlist",
+            "confirm_mode": "confirm",
+            "require_confirm": True,
             "allowed_project_dirs": allowed_dirs,
             "project_modes": project_modes,
             "updated_at": now_shanghai().isoformat(timespec="seconds"),
@@ -1535,17 +1984,19 @@ def cmd_init(args: argparse.Namespace) -> int:
             run_cmd(["git", "remote", "add", "origin", remote_url], cwd=repo_dir)
         elif full_repo_name not in rem.stdout.strip():
             run_cmd(["git", "remote", "set-url", "origin", remote_url], cwd=repo_dir)
-        ls_rem = run_cmd(["git", "ls-remote", "--heads", "origin", "main"], cwd=repo_dir, check=False, timeout=8)
+        ls_rem = run_cmd(["git", "ls-remote", "--heads", "origin", "main"], cwd=repo_dir, check=False, timeout=15)
         if ls_rem.returncode == 0 and ls_rem.stdout.strip():
-            run_cmd(["git", "pull", "--rebase", "--autostash", "origin", "main"], cwd=repo_dir, check=False, timeout=10)
+            run_cmd(["git", "pull", "--rebase", "--autostash", "origin", "main"], cwd=repo_dir, check=False, timeout=30)
 
     print(f"[done] v{version_cfg.get('schema_version', SCHEMA_VERSION)} 初始化完成：私有库={full_repo_name}")
     print(f"[ok] 本地白名单（chmod 0600）：{policy_file} -> {proj_str}")
-    print(f"[ok] 同步模式：--mode {mode} | 确认策略：--confirm-mode {confirm_mode}")
+    print(f"[ok] 本地提交作者身份：{owner} <{owner}@users.noreply.github.com>")
+    print(f"[ok] 已记录协作者名单：{collab_logins}")
+    print(f"[ok] 同步模式：--mode {mode} | 确认策略：confirm (需 preview + --confirm-hash)")
     print(f"[ok] 已安装 Git pre-commit 护栏：{repo_dir / '.git' / 'hooks' / 'pre-commit'}")
     if mode == "project-rule":
         joined = ", ".join(str(p) for p in touched_rule_files) or str(project_dir / "AGENTS.md")
-        print(f"[ok] 仅在授权工作目录写入快捷同步规则（绝未触碰全局规则）：{joined}")
+        print(f"[ok] 仅在授权科研目录写入项目规则（绝未触碰全局规则）：{joined}")
     else:
         print("[info] 纯手动零侵入模式：绝未写入任何全局或项目级 AGENTS.md / CLAUDE.md。")
     return 0
@@ -1555,6 +2006,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     hub_dir = Path(args.hub_dir).expanduser().resolve() if args.hub_dir else default_hub_dir()
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     policy_file = Path(args.policy_file).expanduser().resolve()
+    prov_file = provenance_file_for_policy(policy_file)
 
     if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
         print(f"[error] 私有库尚未初始化：{repo_dir}", file=sys.stderr)
@@ -1575,6 +2027,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
     copied, skipped, rc = perform_attach(
         repo_dir=repo_dir,
         allowed_dirs=allowed_dirs,
+        prov_file=prov_file,
         from_dir_path=Path(cwd_msg),
         week=week,
         target=args.target,
@@ -1593,10 +2046,7 @@ def cmd_attach(args: argparse.Namespace) -> int:
 
     print(f"[ok] 已附加 {len(copied)} 个可审计文件到私有库（可按下方相对链接写进 evidence.md）：")
     for rel in copied:
-        if rel.startswith(f"weekly/{week}/"):
-            ev_link = rel[len(f"weekly/{week}/"):]
-        else:
-            ev_link = f"../../{rel}"
+        ev_link = rel[len(f"weekly/{week}/"):] if rel.startswith(f"weekly/{week}/") else f"../../{rel}"
         print(f"  - {rel}  ->  [{Path(rel).name}]({ev_link})")
     return 0
 
@@ -1605,6 +2055,7 @@ def cmd_sync_code(args: argparse.Namespace) -> int:
     hub_dir = Path(args.hub_dir).expanduser().resolve() if args.hub_dir else default_hub_dir()
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     policy_file = Path(args.policy_file).expanduser().resolve()
+    prov_file = provenance_file_for_policy(policy_file)
 
     if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
         print(f"[error] 私有库尚未初始化：{repo_dir}", file=sys.stderr)
@@ -1623,11 +2074,13 @@ def cmd_sync_code(args: argparse.Namespace) -> int:
     copied, skipped, deleted, dest_rel, rc = perform_sync_code(
         repo_dir=repo_dir,
         allowed_dirs=allowed_dirs,
+        prov_file=prov_file,
         from_dir_path=Path(cwd_msg),
         source_arg=args.source,
         dest_arg=args.dest,
         max_files=args.max_files,
         delete_extra=args.delete,
+        include_untracked=getattr(args, "include_untracked", False),
         max_bytes=max_bytes,
     )
     for msg in skipped[:25]:
@@ -1639,8 +2092,8 @@ def cmd_sync_code(args: argparse.Namespace) -> int:
 
     print(
         f"[ok] 已同步代码目录至 {dest_rel}/：复制 {len(copied)} 个文件"
-        + (f"，清理冗余 {len(deleted)} 个" if deleted else "")
-        + f"（总跳过 {len(skipped)} 项）"
+        + (f"，清理本地冗余 {len(deleted)} 个" if deleted else "")
+        + f"（跳过 {len(skipped)} 项非源码/点文件）"
     )
     return 0
 
@@ -1649,6 +2102,7 @@ def cmd_preview(args: argparse.Namespace) -> int:
     hub_dir = Path(args.hub_dir).expanduser().resolve() if args.hub_dir else default_hub_dir()
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     policy_file = Path(args.policy_file).expanduser().resolve()
+    prov_file = provenance_file_for_policy(policy_file)
 
     if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
         print(f"[error] 私有库尚未初始化：{repo_dir}，请先运行 init --project-dir \"<科研目录>\"", file=sys.stderr)
@@ -1663,9 +2117,16 @@ def cmd_preview(args: argparse.Namespace) -> int:
     version_cfg, _ = load_hub_configs(hub_dir)
     max_bytes = int(version_cfg.get("limits", {}).get("max_single_file_bytes", MAX_SINGLE_FILE_BYTES))
     pending = collect_pending_rel_paths(repo_dir)
-    if not pending:
-        print(f"[preview] 目录白名单校验通过 ({cwd_msg})，当前没有待同步的新增或修改文件。")
+    deleted = collect_deleted_rel_paths(repo_dir)
+    if not pending and not deleted:
+        print(f"[preview] 目录白名单校验通过 ({cwd_msg})，当前没有待同步或待删除的文件。")
         return 0
+
+    prov_errs = check_pending_provenance(prov_file, repo_dir, pending)
+    if prov_errs:
+        for e in prov_errs:
+            print(f"[BLOCK] {e}", file=sys.stderr)
+        return 5
 
     errs, warns = audit_paths(repo_dir, pending, max_bytes=max_bytes)
     for w in warns:
@@ -1675,13 +2136,17 @@ def cmd_preview(args: argparse.Namespace) -> int:
             print(f"[BLOCK] {e}", file=sys.stderr)
         return 3
 
+    digest = compute_pending_digest(repo_dir, pending, deleted)
+    policy["last_preview_hash"] = digest
+    policy["last_preview_repo"] = str(repo_dir)
+    policy["last_preview_at"] = now_shanghai().isoformat(timespec="seconds")
+    save_policy(policy_file, policy)
+
     print(f"[preview] 授权目录校验通过：{cwd_msg}")
-    print(f"[preview] Tier-1 硬门禁全部通过，本次拟同步 {len(pending)} 个文件：\n")
-    print(format_plaintext_preview(repo_dir, pending))
-    if policy.get("confirm_mode") == "auto-in-allowlist":
-        print("\n[preview] 当前策略为白名单内无感推送（judgment.md 仍需 --confirm）。")
-    else:
-        print("\n[preview] 以上内容尚未提交或推送。确认无误后，请运行带 --confirm 的 push / upload 命令。")
+    print(f"[preview] Tier-1 与来源围栏全部通过，待同步 {len(pending)} 项、待删除 {len(deleted)} 项：\n")
+    print(format_plaintext_preview(repo_dir, pending, deleted, full_code=getattr(args, "full_code", False)))
+    print(f"\n预览确认码 (confirm-hash): {digest}")
+    print(f'[preview] 确认无误后，请运行：python3 ~/.yao-research/hub/scripts/yao_sync.py push --confirm-hash {digest} --from-dir "{cwd_msg}"')
     return 0
 
 
@@ -1689,6 +2154,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     hub_dir = Path(args.hub_dir).expanduser().resolve() if args.hub_dir else default_hub_dir()
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     policy_file = Path(args.policy_file).expanduser().resolve()
+    prov_file = provenance_file_for_policy(policy_file)
 
     if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
         print(f"[error] 私有库尚未初始化：{repo_dir}，请先运行 init --project-dir \"<科研目录>\"", file=sys.stderr)
@@ -1700,6 +2166,10 @@ def cmd_push(args: argparse.Namespace) -> int:
         print(f"[BLOCK] {cwd_msg}", file=sys.stderr)
         return 5
 
+    _, cm_warn = effective_project_confirm_mode(policy, Path(cwd_msg))
+    if cm_warn:
+        print(f"[WARN] {cm_warn}")
+
     version_cfg, schedule = load_hub_configs(hub_dir)
     limits = version_cfg.get("limits", {})
     max_bytes = int(limits.get("max_single_file_bytes", MAX_SINGLE_FILE_BYTES))
@@ -1708,6 +2178,14 @@ def cmd_push(args: argparse.Namespace) -> int:
     week = args.week or sched_res["active_week"]
 
     pending = collect_pending_rel_paths(repo_dir)
+    deleted = collect_deleted_rel_paths(repo_dir)
+
+    prov_errs = check_pending_provenance(prov_file, repo_dir, pending)
+    if prov_errs:
+        for e in prov_errs:
+            print(f"[BLOCK] {e}", file=sys.stderr)
+        return 5
+
     errs, warns = audit_paths(repo_dir, pending, max_bytes=max_bytes)
     for w in warns:
         print(f"[WARN] {w}")
@@ -1737,6 +2215,12 @@ def cmd_push(args: argparse.Namespace) -> int:
                 print(f"[BLOCK] {e}", file=sys.stderr)
             return 4
         pending = collect_pending_rel_paths(repo_dir)
+        deleted = collect_deleted_rel_paths(repo_dir)
+        prov_errs2 = check_pending_provenance(prov_file, repo_dir, pending)
+        if prov_errs2:
+            for e in prov_errs2:
+                print(f"[BLOCK] {e}", file=sys.stderr)
+            return 5
         errs2, warns2 = audit_paths(repo_dir, pending, max_bytes=max_bytes)
         for w in warns2:
             if w not in warns:
@@ -1746,23 +2230,27 @@ def cmd_push(args: argparse.Namespace) -> int:
                 print(f"[BLOCK] {e}", file=sys.stderr)
             return 3
 
-    touches_judgment = any(
-        re.match(r"^weekly/\d{4}-W\d{2}/judgment\.md$", p.replace("\\", "/")) for p in pending
-    )
-    confirm_mode = policy.get("confirm_mode", "confirm")
-    must_confirm = (confirm_mode != "auto-in-allowlist") or touches_judgment
+    current_digest = compute_pending_digest(repo_dir, pending, deleted)
+    provided_hash = (getattr(args, "confirm_hash", None) or "").strip().lower()
+    recorded_hash = (policy.get("last_preview_hash") or "").strip().lower()
+    recorded_repo = policy.get("last_preview_repo") or str(repo_dir)
 
-    if must_confirm and not args.confirm:
-        reason = "检测到修改了本人判断页 (judgment.md)，必须经本人亲自确认" if touches_judgment else "当前策略要求推送前确认"
+    if (pending or deleted) and (
+        not provided_hash
+        or provided_hash != current_digest
+        or recorded_hash != current_digest
+        or recorded_repo != str(repo_dir)
+    ):
         print(
-            f"[BLOCK] 安全门禁（{reason}）：未传 --confirm，已阻止推送。请先向本人展示下方待推摘要，获同意后加 --confirm 执行：\n",
+            "[BLOCK] 安全门禁：未绑定有效预览确认码 (--confirm-hash)，已阻止推送。\n"
+            f"原因：必须先运行 `preview` 展示完整内容，且推送时 --confirm-hash 须严格等于当前摘要码 {current_digest}"
+            f"（最近预览码：{recorded_hash or '无'}；传入：{provided_hash or '无'}）。\n"
+            "请先向本人完整展示下方最新预览内容后重试：\n",
             file=sys.stderr,
         )
-        print(format_plaintext_preview(repo_dir, pending), file=sys.stderr)
+        print(format_plaintext_preview(repo_dir, pending, deleted), file=sys.stderr)
+        print(f"\n预览确认码 (confirm-hash): {current_digest}", file=sys.stderr)
         return 6
-
-    if not must_confirm and not args.confirm and pending:
-        print("[auto-in-allowlist] 白名单目录无感直推（未含 judgment.md），直接核验提交。")
 
     if not args.skip_remote:
         rem = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir, check=False)
@@ -1773,6 +2261,9 @@ def cmd_push(args: argparse.Namespace) -> int:
 
     if pending:
         run_cmd(["git", "add", "--"] + pending, cwd=repo_dir)
+    if deleted:
+        run_cmd(["git", "rm", "-f", "--ignore-unmatch", "--"] + deleted, cwd=repo_dir)
+
     st = run_cmd(["git", "status", "--porcelain"], cwd=repo_dir).stdout.strip()
     if st:
         default_msg = (
@@ -1786,21 +2277,26 @@ def cmd_push(args: argparse.Namespace) -> int:
             err_txt = commit_p.stderr.strip() or commit_p.stdout.strip()
             print(f"[BLOCK] 提交被 Git hook 拦截：{err_txt}", file=sys.stderr)
             return 3
+        remove_provenance_entries(prov_file, repo_dir, deleted)
+        # Consume preview hash so same confirmation code cannot silently push subsequent unpreviewed edits
+        policy["last_preview_hash"] = ""
+        save_policy(policy_file, policy)
         print(f"[ok] 已提交：{msg}（白名单目录：{cwd_msg}）")
     else:
         print("[ok] 工作区无新变更。")
 
     if not args.skip_remote:
+        push_timeout = int(getattr(args, "push_timeout", 60) or 60)
         rem = run_cmd(["git", "remote", "get-url", "origin"], cwd=repo_dir, check=False)
         if rem.returncode == 0 and rem.stdout.strip():
             branch = run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir, check=False).stdout.strip() or "main"
             if branch == "HEAD":
                 branch = "main"
             try:
-                ls_rem = run_cmd(["git", "ls-remote", "--heads", "origin", branch], cwd=repo_dir, check=False, timeout=6)
+                ls_rem = run_cmd(["git", "ls-remote", "--heads", "origin", branch], cwd=repo_dir, check=False, timeout=15)
                 if ls_rem.returncode == 0 and ls_rem.stdout.strip():
-                    run_cmd(["git", "pull", "--rebase", "--autostash", "origin", branch], cwd=repo_dir, check=False, timeout=10)
-                push_p = run_cmd(["git", "push", "-u", "origin", branch], cwd=repo_dir, check=False, timeout=10)
+                    run_cmd(["git", "pull", "--rebase", "--autostash", "origin", branch], cwd=repo_dir, check=False, timeout=30)
+                push_p = run_cmd(["git", "push", "-u", "origin", branch], cwd=repo_dir, check=False, timeout=push_timeout)
                 if push_p.returncode == 0:
                     print(f"[ok] 已推送至私有仓库 origin/{branch}")
                 else:
@@ -1811,10 +2307,11 @@ def cmd_push(args: argparse.Namespace) -> int:
 
 
 def cmd_upload(args: argparse.Namespace) -> int:
-    """One-shot seamless workflow: optional attach -> optional sync-code -> push."""
+    """Bundle attach/sync-code, then verify preview hash / push."""
     hub_dir = Path(args.hub_dir).expanduser().resolve() if args.hub_dir else default_hub_dir()
     repo_dir = Path(args.repo_dir).expanduser().resolve()
     policy_file = Path(args.policy_file).expanduser().resolve()
+    prov_file = provenance_file_for_policy(policy_file)
 
     if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
         print(f"[error] 私有库尚未初始化：{repo_dir}", file=sys.stderr)
@@ -1836,6 +2333,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
         copied, skipped, rc = perform_attach(
             repo_dir=repo_dir,
             allowed_dirs=allowed_dirs,
+            prov_file=prov_file,
             from_dir_path=Path(cwd_msg),
             week=week,
             target="artifacts",
@@ -1853,11 +2351,13 @@ def cmd_upload(args: argparse.Namespace) -> int:
         copied_c, skipped_c, _, dest_rel, rc_c = perform_sync_code(
             repo_dir=repo_dir,
             allowed_dirs=allowed_dirs,
+            prov_file=prov_file,
             from_dir_path=Path(cwd_msg),
             source_arg=args.sync_code,
             dest_arg=None,
             max_files=200,
             delete_extra=False,
+            include_untracked=getattr(args, "include_untracked", False),
             max_bytes=max_bytes,
         )
         for msg in skipped_c[:15]:
@@ -1876,14 +2376,19 @@ def cmd_policy(args: argparse.Namespace) -> int:
         print(f"[info] 策略文件尚不存在：{policy_file}")
         return 1
 
-    changed = False
     if getattr(args, "set_confirm_mode", None):
         cm = args.set_confirm_mode
-        policy["confirm_mode"] = cm
-        policy["require_confirm"] = cm != "auto-in-allowlist"
+        if cm == "auto-in-allowlist":
+            print(
+                "[BLOCK] v3.1 试用阶段禁止切换至 auto-in-allowlist，目前只允许 confirm + --confirm-hash 模式。",
+                file=sys.stderr,
+            )
+            return 2
+        policy["confirm_mode"] = "confirm"
+        policy["require_confirm"] = True
         policy["updated_at"] = now_shanghai().isoformat(timespec="seconds")
-        changed = True
-        print(f"[ok] 已更新 confirm_mode = {cm}")
+        save_policy(policy_file, policy)
+        print("[ok] confirm_mode 已确认为 confirm")
 
     if getattr(args, "remove_project_dir", None):
         target = str(Path(args.remove_project_dir).expanduser().resolve(strict=False))
@@ -1897,13 +2402,10 @@ def cmd_policy(args: argparse.Namespace) -> int:
             pm.pop(target, None)
             policy["project_modes"] = pm
             policy["updated_at"] = now_shanghai().isoformat(timespec="seconds")
-            changed = True
+            save_policy(policy_file, policy)
             print(f"[ok] 已从白名单移除目录：{target}")
 
-    if changed:
-        save_policy(policy_file, policy)
-
-    if getattr(args, "show", False) or not changed:
+    if getattr(args, "show", False) or not any([getattr(args, "set_confirm_mode", None), getattr(args, "remove_project_dir", None)]):
         print(json.dumps(policy, ensure_ascii=False, indent=2))
     return 0
 
@@ -1919,19 +2421,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     dt = now_shanghai(args.now)
     sched_res = evaluate_schedule(schedule, dt, repo_dir)
     pending = collect_pending_rel_paths(repo_dir)
+    deleted = collect_deleted_rel_paths(repo_dir)
     ahead = ahead_commit_count(repo_dir)
+
+    cwd_path = Path(cwd_msg) if ok_cwd else Path.cwd().resolve()
+    eff_cm, _ = effective_project_confirm_mode(policy, cwd_path)
+    matched = find_matching_allowed_root(cwd_path, policy.get("allowed_project_dirs", []))
+    pm_entry = policy.get("project_modes", {}).get(str(matched), {}) if matched else {}
 
     result = {
         "schema_version": version_cfg.get("schema_version", SCHEMA_VERSION),
         "hub_dir": str(hub_dir),
         "repo_dir": str(repo_dir),
         "policy_file": str(policy_file),
-        "mode": policy.get("mode", "manual"),
-        "confirm_mode": policy.get("confirm_mode", "confirm"),
+        "mode": pm_entry.get("mode", policy.get("mode", "manual")),
+        "confirm_mode": eff_cm,
+        "collaborators": policy.get("collaborators", []),
         "allowed_project_dirs": policy.get("allowed_project_dirs", []),
         "cwd_authorized": ok_cwd,
         "cwd_detail": cwd_msg,
         "pending_files": pending,
+        "deleted_files": deleted,
+        "last_preview_hash": policy.get("last_preview_hash", ""),
         "unpushed_commits": ahead,
         **sched_res,
     }
@@ -1943,7 +2454,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"| 授权目录数: {len(result['allowed_project_dirs'])} | 当前目录授权: {ok_cwd}"
         )
         print(f"[status] 本周({result['active_week']}) 状态: {result['submission_state']} | 窗口: {result['window_reason']} | 提醒: {result['action']}")
-        print(f"[status] 待同步文件: {len(pending)} | 本地待推提交: {ahead}")
+        print(f"[status] 待同步文件: {len(pending)} | 待删除文件: {len(deleted)} | 本地待推提交: {ahead}")
     return 0
 
 
@@ -1952,7 +2463,7 @@ def cmd_check_update(args: argparse.Namespace) -> int:
     if not (hub_dir / ".git").exists():
         print(f"[error] {hub_dir} 不是 Git 仓库。", file=sys.stderr)
         return 1
-    run_cmd(["git", "fetch", "origin"], cwd=hub_dir, timeout=10)
+    run_cmd(["git", "fetch", "origin"], cwd=hub_dir, timeout=15)
     log_p = run_cmd(["git", "log", "HEAD..origin/main", "--oneline", "--stat"], cwd=hub_dir, check=False)
     out = log_p.stdout.strip()
     if not out:
@@ -1968,7 +2479,7 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     if not (hub_dir / ".git").exists():
         print(f"[error] {hub_dir} 不是 Git 仓库。", file=sys.stderr)
         return 1
-    run_cmd(["git", "pull", "--ff-only"], cwd=hub_dir, timeout=15)
+    run_cmd(["git", "pull", "--ff-only"], cwd=hub_dir, timeout=30)
     if (repo_dir / ".git").exists():
         install_pre_commit_hook(repo_dir, dry_run=False)
     print(f"[ok] 已手动升级协议中心并刷新护栏：{hub_dir}")
@@ -1982,34 +2493,34 @@ def _add_common_repo_args(p: argparse.ArgumentParser) -> None:
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Yao Research Group 科研进展与代码图表同步工具 (v3.0)")
+    parser = argparse.ArgumentParser(description="Yao Research Group 科研进展与代码图表同步工具 (v3.1.0)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="登记授权科研目录、建私有库(默认仅导师 taoyao2005)并装护栏")
-    p_init.add_argument("--project-dir", default=None, help="必填：用户明确指定的一个科研工作目录")
+    p_init = sub.add_parser("init", help="登记具体科研课题目录、建私有库(默认仅 taoyao2005)并装护栏")
+    p_init.add_argument("--project-dir", default=None, help="必填：具体的科研工作子目录（拒绝 /、$HOME 与顶层宽目录）")
     p_init.add_argument("--repo-name", default=None, help="私有仓库名（默认 yao-research-memory）")
     _add_common_repo_args(p_init)
     p_init.add_argument(
         "--collaborators",
         default=None,
-        help="逗号分隔指定 GitHub 协作者，默认仅 taoyao2005；同组互看可传如 taoyao2005,teammate",
+        help="逗号分隔指定 GitHub 协作者；重跑不传时沿用本地已保存名单，首次默认仅 taoyao2005",
     )
     p_init.add_argument(
         "--mode",
         default="manual",
         choices=["manual", "project-rule"],
-        help="manual=零侵入纯手动（默认）；project-rule=仅在授权工作目录写 AGENTS.md 无感规则（绝不碰全局）",
+        help="manual=零侵入纯手动（默认）；project-rule=仅在该课题目录维护 AGENTS.md 与 CLAUDE.md（不碰全局）",
     )
     p_init.add_argument(
         "--confirm-mode",
         default="confirm",
         choices=["confirm", "auto-in-allowlist"],
-        help="confirm=推送前需确认（默认）；auto-in-allowlist=白名单内进展/代码无感直推（judgment.md 仍需 --confirm）",
+        help="v3.1 试用阶段仅开放 confirm（传入 auto-in-allowlist 将被拒绝）",
     )
     p_init.add_argument("--skip-remote", action="store_true", help="跳过远端 GitHub 建库")
     p_init.add_argument("--dry-run", action="store_true", help="仅预览操作不写文件")
 
-    p_att = sub.add_parser("attach", help="把白名单目录内的实验图表/结果表/代码脚本附加到周报或 code/")
+    p_att = sub.add_parser("attach", help="显式附加白名单目录内的实验图表/数据表(CSV/JSON/PDF)/代码")
     _add_common_repo_args(p_att)
     p_att.add_argument("--from-dir", default=None, help="来源工作目录（默认当前 CWD）")
     p_att.add_argument("--week", default=None, help="目标周次（默认当前活跃周）")
@@ -2018,21 +2529,25 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_att.add_argument("--now", default=None, help=argparse.SUPPRESS)
     p_att.add_argument("files", nargs="+", help="要附加的文件或目录路径（必须位于白名单科研目录内）")
 
-    p_sc = sub.add_parser("sync-code", help="把白名单科研目录的代码树安全同步到私有库 code/ 下供导师审计")
+    p_sc = sub.add_parser("sync-code", help="只同步源码白名单扩展名（跳过点文件/点目录、CSV/PDF/JSON）到 code/")
     _add_common_repo_args(p_sc)
     p_sc.add_argument("--from-dir", default=None, help="来源工作目录（默认当前 CWD）")
     p_sc.add_argument("--source", default=".", help="相对 --from-dir 或绝对源码目录路径（须在白名单内）")
     p_sc.add_argument("--dest", default=None, help="目标相对目录名，如 code/pfn-mdp（默认 code/<项目目录名>）")
     p_sc.add_argument("--max-files", type=int, default=200, help="单次最多同步文件数（默认 200）")
     p_sc.add_argument("--delete", action="store_true", help="清理目标目录中源端已删除的文件")
+    p_sc.add_argument("--include-untracked", action="store_true", help="在 Git 仓库中也扫描未跟踪的源码扩展名文件")
 
-    p_prev = sub.add_parser("preview", help="校验白名单、执行分级审计并展示待上传清单与汇报明文")
+    p_prev = sub.add_parser("preview", help="校验目录围栏与来源清单、审计凭据/PII、输出完整正文与 confirm-hash")
     _add_common_repo_args(p_prev)
     p_prev.add_argument("--from-dir", default=None, help="来源工作目录（默认当前 CWD）")
+    p_prev.add_argument("--full-code", action="store_true", help="同时展开打印 code/ 下文本文件全文")
 
-    p_push = sub.add_parser("push", help="过护栏审计并提交推送（根据 confirm-mode 与是否含 judgment.md 决定确认要求）")
+    p_push = sub.add_parser("push", help="校验来源清单、护栏及 --confirm-hash 绑定码后提交推送")
     _add_common_repo_args(p_push)
-    p_push.add_argument("--confirm", action="store_true", help="确认推送标志（confirm 模式或修改 judgment.md 时必填）")
+    p_push.add_argument("--confirm", action="store_true", help=argparse.SUPPRESS)
+    p_push.add_argument("--confirm-hash", default=None, help="必填：与最新 preview 输出完全一致的 12 位确认码")
+    p_push.add_argument("--push-timeout", type=int, default=60, help="git push 超时秒数（默认 60s）")
     p_push.add_argument("--from-dir", default=None, help="来源工作目录（默认当前 CWD）")
     p_push.add_argument("--mode", default="auto", choices=["auto", "progress", "weekly", "code"])
     p_push.add_argument("--week", default=None)
@@ -2040,26 +2555,29 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p_push.add_argument("--skip-remote", action="store_true")
     p_push.add_argument("--now", default=None, help=argparse.SUPPRESS)
 
-    p_up_one = sub.add_parser("upload", help="一站式上传：可选 --attach 与 --sync-code 后直接走 push 审计提交")
+    p_up_one = sub.add_parser("upload", help="打包 attach/sync-code 并走 push --confirm-hash 校验")
     _add_common_repo_args(p_up_one)
     p_up_one.add_argument("--from-dir", default=None, help="来源工作目录（默认当前 CWD）")
     p_up_one.add_argument("--week", default=None)
     p_up_one.add_argument("--attach", action="append", default=[], help="附加文件/目录到 weekly/<W>/artifacts/（可多次传）")
-    p_up_one.add_argument("--sync-code", default=None, help="同时同步代码子目录或 . 到 code/")
-    p_up_one.add_argument("--confirm", action="store_true")
+    p_up_one.add_argument("--sync-code", default=None, help="同步代码子目录或 . 到 code/")
+    p_up_one.add_argument("--include-untracked", action="store_true")
+    p_up_one.add_argument("--confirm", action="store_true", help=argparse.SUPPRESS)
+    p_up_one.add_argument("--confirm-hash", default=None)
+    p_up_one.add_argument("--push-timeout", type=int, default=60)
     p_up_one.add_argument("--mode", default="auto", choices=["auto", "progress", "weekly", "code"])
     p_up_one.add_argument("--message", default=None)
     p_up_one.add_argument("--skip-remote", action="store_true")
     p_up_one.add_argument("--now", default=None, help=argparse.SUPPRESS)
 
-    p_pol = sub.add_parser("policy", help="查看或调整本地白名单策略（confirm-mode / 移除目录）")
+    p_pol = sub.add_parser("policy", help="查看或移除本地白名单目录")
     p_pol.add_argument("--policy-file", default=str(default_policy_file()))
     p_pol.add_argument("--show", action="store_true", help="查看当前策略 JSON")
     p_pol.add_argument("--set-confirm-mode", default=None, choices=["confirm", "auto-in-allowlist"])
     p_pol.add_argument("--remove-project-dir", default=None, help="从白名单移除某个目录")
 
     for cmd_name in ("status", "preflight"):
-        p_st = sub.add_parser(cmd_name, help="只读查看授权目录、同步策略、周报窗口与待推状态")
+        p_st = sub.add_parser(cmd_name, help="只读查看授权目录、协作者名单、确认码状态与待推清单")
         _add_common_repo_args(p_st)
         p_st.add_argument("--from-dir", default=None)
         p_st.add_argument("--json", dest="json_out", action="store_true")

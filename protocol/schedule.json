@@ -1,5 +1,5 @@
 {
-  "schema_version": "3.0.0",
+  "schema_version": "3.1.0",
   "timezone": "Asia/Shanghai",
   "utc_offset_hours": 8,
   "trial_weeks": 4,
@@ -11,7 +11,7 @@
     "grace_end": "2026-11-25T23:59:59+08:00",
     "remind_only": true,
     "require_human_judgment": false,
-    "notes": "首周过渡期：支持仅传 evidence/report/artifacts，逐步对齐双轨（evidence.md + judgment.md）。"
+    "notes": "首周过渡期：支持仅传 evidence/report/artifacts，全部推送须经 preview 与 --confirm-hash 确认码校验。"
   },
   "regular_weekly": {
     "enabled": true,

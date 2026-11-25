@@ -1,29 +1,21 @@
-# 备选安装与常用管理指南（v3.0 · 无 `gh` CLI 网页建库 + 常用命令）
+# 备选安装与常用管理指南（v3.1.0 · 无 `gh` CLI 网页建库 + 常用命令）
 
-如果本机未安装或不便使用 GitHub CLI（`gh`），可按以下 3 步手动建私有库，随后正常使用全部白名单围栏与 `attach` / `sync-code` / `upload` 功能：
-
-## 一、3 步网页建私有库（无 `gh` CLI 时）
+## 一、无 `gh` CLI 时 4 步网页建私有库并完成首次推送
 
 1. 打开 `https://github.com/new`：
-   - **Repository name** 填写：`yao-research-memory`
+   - **Repository name** 填写：`yao-research-memory`（若多课题需按队友分库隔离，可改如 `yao-research-pfn`）
    - **Visibility** 必须勾选 **`Private`**（严禁选 Public）
    - 点击 **Create repository**
-2. 进入新仓库 **Settings → Collaborators → Add people**，添加导师为协作者：
-   - `taoyao2005`（导师；组织库选 Read/Pull，个人私有库直接添加即可）
-   - 若同课题组需要队友互看代码，可自行再加队友 GitHub ID。
-3. 克隆协议中心并在你指定的科研目录初始化（按需二选一 `--mode`）：
+2. 进入新仓库 **Settings → Collaborators → Add people**，添加导师 `taoyao2005`（如实说明：个人私有库在 GitHub 平台层实际赋予协作者 Write/Push 权限；组织库可选只读 Read）。
+3. 克隆协议中心并在具体的科研课题子目录初始化（禁止 `/`、`$HOME`、`~/Documents` 等宽目录）：
    ```bash
    git clone https://github.com/Yao-Research-Group/research-hub.git ~/.yao-research/hub
-
-   # 选项 A：仅在该科研目录启用无感规范（绝不碰全局）
-   python3 ~/.yao-research/hub/scripts/yao_sync.py init \
-     --project-dir "/path/to/your/research-dir" \
-     --mode project-rule \
-     --confirm-mode auto-in-allowlist \
-     --skip-remote
-
-   # 选项 B：零侵入纯手动工具
-   # python3 ~/.yao-research/hub/scripts/yao_sync.py init --project-dir "/path/to/your/research-dir" --skip-remote
+   python3 ~/.yao-research/hub/scripts/yao_sync.py init --project-dir "/path/to/your/specific-topic-dir" --skip-remote
+   ```
+4. **先产生首次本地提交，再关联远端推送**（`init` 只建目录骨架不自动产生提交，直接 `git push` 会失败）：
+   ```bash
+   python3 ~/.yao-research/hub/scripts/yao_sync.py preview --from-dir "/path/to/your/specific-topic-dir"
+   python3 ~/.yao-research/hub/scripts/yao_sync.py push --confirm-hash <上一步输出的12位确认码> --from-dir "/path/to/your/specific-topic-dir" --skip-remote
 
    cd ~/.yao-research/repo
    git remote add origin https://github.com/<你的GitHub账号>/yao-research-memory.git
@@ -32,28 +24,37 @@
 
 ---
 
-## 二、日常高频命令速查
+## 二、日常高频命令速查（v3.1.0）
 
-- **附加实验图表 / CSV 到本周周报 `artifacts/`**：
+- **只同步干净源码（默认仅 Git 已跟踪的明确源码扩展名，跳过 `.env`/`.netrc`/`.claude/`/CSV/PDF）**：
   ```bash
-  python3 ~/.yao-research/hub/scripts/yao_sync.py attach --from-dir "<科研目录>" figures/loss.png results/metrics.csv
+  python3 ~/.yao-research/hub/scripts/yao_sync.py sync-code --from-dir "<课题目录>" --source . --dest code/my-project
+  # 若有未 git add 的新源码脚本想纳入，加 --include-untracked；若要同步删掉源端已删文件，加 --delete
   ```
-- **同步当前科研项目源码树到 `code/`（自动跳过缓存/密钥/权重/.gitignore）**：
+- **显式附加实验图表 / CSV / JSON / PDF 到周报 `artifacts/`**：
   ```bash
-  python3 ~/.yao-research/hub/scripts/yao_sync.py sync-code --from-dir "<科研目录>" --source src --dest code/my-project
+  python3 ~/.yao-research/hub/scripts/yao_sync.py attach --from-dir "<课题目录>" figures/loss.png results/metrics.csv
   ```
-- **一条龙附加产物 + 同步代码 + 推送**：
+- **预览清单、完整明文并生成确认码**（加 `--full-code` 可同时展开源码正文）：
   ```bash
-  python3 ~/.yao-research/hub/scripts/yao_sync.py upload --from-dir "<科研目录>" --attach results/metrics.csv --sync-code . --mode weekly --confirm
+  python3 ~/.yao-research/hub/scripts/yao_sync.py preview --from-dir "<课题目录>"
   ```
-- **切换确认策略 / 查看或管理本地白名单**：
+- **凭确认码正式推送**（默认 `git push` 超时 60s，可加 `--push-timeout 120`）：
   ```bash
-  python3 ~/.yao-research/hub/scripts/yao_sync.py policy --show
-  python3 ~/.yao-research/hub/scripts/yao_sync.py policy --set-confirm-mode auto-in-allowlist
-  python3 ~/.yao-research/hub/scripts/yao_sync.py policy --remove-project-dir "<旧科研目录>"
+  python3 ~/.yao-research/hub/scripts/yao_sync.py push --confirm-hash <12位确认码> --from-dir "<课题目录>"
   ```
-- **添加第 2 个科研目录到白名单**：再对该目录执行一次 `init --project-dir "<第2个科研目录>"` 即可安全追加，绝不影响已有仓库数据。
-- **检查或手动升级协议中心**：
-  - `python3 ~/.yao-research/hub/scripts/yao_sync.py check-update`（只读查看更新）
-  - `python3 ~/.yao-research/hub/scripts/yao_sync.py upgrade`（确认后升级并刷新 `.git/hooks/pre-commit` 护栏）
-- **完全退出或撤销授权**：在私有库 `Settings -> Collaborators` 一键移除协作者即可；本地删除 `~/.yao-research/`（以及选用 `project-rule` 时科研目录内 `AGENTS.md` 中的标记块）即可彻底退出。
+- **多项目分库隔离**（不同项目队友不同，勿混用同一私有库）：
+  ```bash
+  python3 ~/.yao-research/hub/scripts/yao_sync.py init \
+    --project-dir "/path/to/project-b" \
+    --repo-name yao-research-project-b \
+    --repo-dir ~/.yao-research/repo-project-b \
+    --collaborators taoyao2005,teammate_b
+  ```
+- **导师端白名单审批与安全拉取**：
+  ```bash
+  python3 ~/.yao-research/hub/scripts/advisor_collect.py --allow-student <学生GitHub> --accept-invites --sync --digest
+  ```
+- **检查更新与彻底退出**：
+  - `check-update` / `upgrade`：查看与手动升级 `~/.yao-research/hub` 并刷新本地 `pre-commit` 钩子；
+  - 完全退出：在 GitHub 仓库 `Settings -> Collaborators` 移除协作者，本地删去 `~/.yao-research/` 即可。

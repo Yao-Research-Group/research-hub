@@ -1,5 +1,5 @@
 {
-  "schema_version": "3.0.0",
+  "schema_version": "3.1.0",
   "notebook_schema_version": 4,
   "updated_at": "2026-11-25",
   "hub_repo": "Yao-Research-Group/research-hub",
@@ -30,7 +30,6 @@
     "weekly/YYYY-Www/report.md",
     "weekly/YYYY-Www/artifacts/<subpath>",
     "code/<subpath>",
-    "sessions/YYYY-MM-DD*.md",
     "projects/*.md"
   ],
   "files": {
@@ -53,24 +52,19 @@
   },
   "changelog": [
     {
+      "version": "3.1.0",
+      "date": "2026-11-25",
+      "summary": "Security audit hardening: reject broad project dirs (/, $HOME, top-level folders), narrow sync-code to git-tracked explicit source extensions with no dotfiles/dotdirs/CSV/PDF/JSON, block HF/AWS/WandB/DB-URL/password=/webhook credentials & ID cards & table phones, enforce local provenance.json for code/ and artifacts/, bind push --confirm-hash to un-truncated preview digest, support deletion sync & 60s push timeout, persist collaborators & force local noreply git author, trial-lockdown auto-in-allowlist and sessions/, harden advisor_collect.py against symlinks (core.symlinks=false + index check), untrusted invites (--allow-student allowlist), and prompt injection (<untrusted_student_data>)."
+    },
+    {
       "version": "3.0.0",
       "date": "2026-11-25",
-      "summary": "Directory-jailed seamless research sync: default collaborator narrowed to advisor taoyao2005 only (removed secretary default), allowlist-jailed code/ and weekly/<W>/artifacts/ (figures/CSVs/PDFs up to 10 MiB) + sessions/, layered Tier-1 hard guardrails & Tier-2 dead-link/draft warnings, optional --mode project-rule (local AGENTS.md only, zero global touch) & --confirm-mode auto-in-allowlist (judgment.md still --confirm), dual-track weekly evidence+judgment alignment with 2026-11-24 advisor rules, and advisor_collect.py code-auditable digest."
+      "summary": "Directory-jailed seamless research sync: default collaborator narrowed to advisor taoyao2005 only, allowlist-jailed code/ and weekly/<W>/artifacts/ up to 10 MiB, dual-track evidence+judgment alignment, and advisor_collect.py code-auditable digest."
     },
     {
       "version": "2.0.1",
       "date": "2026-11-24",
       "summary": "Handle GitHub personal repo HTTP 422 fallback when assigning pull permission, add --collaborators option on init, and clarify personal vs org repo collaborator permissions."
-    },
-    {
-      "version": "2.0.0",
-      "date": "2026-11-24",
-      "summary": "Privacy-first manual progress sync: zero global injection, explicit --project-dir allowlist, Git pre-commit guardrails, preview + --confirm gate."
-    },
-    {
-      "version": "1.1.1",
-      "date": "2026-11-24",
-      "summary": "Require explicit scope choice before writing rules and set Monday 19:00 deadline."
     }
   ]
 }

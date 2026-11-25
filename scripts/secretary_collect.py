@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backward-compatible wrapper delegating to advisor_collect.py (v3.0)."""
+"""Backward-compatible wrapper delegating to advisor_collect.py (v3.1.0)."""
 from __future__ import annotations
 
 import sys
